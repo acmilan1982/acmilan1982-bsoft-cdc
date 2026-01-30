@@ -1,0 +1,235 @@
+// BusinessDataSourceConfig.java
+package com.bsoft.common.bean;
+
+import com.bsoft.common.enums.DatabaseType;
+import com.zaxxer.hikari.HikariConfig;
+import com.zaxxer.hikari.HikariDataSource;
+
+import javax.sql.DataSource;
+import java.io.Serializable;
+import java.time.LocalDateTime;
+
+/**
+ * @author snoopy
+ */
+// 目标库配置
+public class TargetDataSourceConfig implements Serializable {
+
+    private String dataSourceId;             // 主键
+    private String dataSourceOrg;            // 数据源机构
+    private String dataSourceHost;           // 数据库主机名
+    private int dataSourcePort;              // 数据库端口
+    private String dataSourceUserName;       // 数据库用户名
+    private String dataSourcePassword;       // 数据库密码
+    private DatabaseType dataSourceType;     // 数据库类型：oracle/mysql/doris
+    private String dataSourceServiceName;    // 服务名
+    private LocalDateTime insertTime;        // 插入时间
+    private LocalDateTime updateTime;        // 更新时间
+    private LocalDateTime deleteTime;        // 删除时间
+    private String fgActive;                 // 是否启用（1=是）
+    private String dataSourceDomain;         // 域名
+    private String dataSourceCategory;       // 源表还是目标表
+    private String sourceApp;                // 源应用
+    private String dataSourceName;           // 数据源名称
+
+    private String  serverId;         // 服务端id
+
+
+//    private DataSource dataSource;
+
+    // 数据库的详细信息，包括类型和版本
+    private DatabaseInfo databaseInfo;
+
+
+
+    public TargetDataSourceConfig() {
+
+    }
+
+
+    /**
+     * 判断当前 Doris 版本是否支持 DATETIMEV2(>= 3.2)
+     * @return true 表示支持 DATETIMEV2,false 表示使用 DATETIME
+     */
+    public boolean shouldEnableDateTimeV2() {
+        if (this.databaseInfo == null
+                || this.databaseInfo.getMajorVersion() == null
+                || this.databaseInfo.getMinorVersion() == null) {
+            return false;
+        }
+
+        int major = this.databaseInfo.getMajorVersion();
+        int minor = this.databaseInfo.getMinorVersion();
+
+        return major > 3 || (major == 3 && minor >= 2);
+    }
+
+    public String getUrl(){
+
+        String jdbcUrl;
+
+        switch (dataSourceType) {
+            case MYSQL:
+                jdbcUrl = String.format("jdbc:mysql://%s:%s/%s?useUnicode=true&characterEncoding=UTF-8&useSSL=false&serverTimezone=Asia/Shanghai",
+                        getDataSourceHost(),
+                        getDataSourcePort(),
+                        getDataSourceServiceName());
+
+                break;
+            case ORACLE:
+                jdbcUrl = String.format(
+                        "jdbc:oracle:thin:@%s:%d/%s",
+                        getDataSourceHost(),
+                        getDataSourcePort(),
+                        getDataSourceServiceName()
+                );
+                break;
+            case DORIS:
+                jdbcUrl = String.format(
+                        "jdbc:mysql://%s:%s/%s?useUnicode=true&characterEncoding=UTF-8&useSSL=false&serverTimezone=Asia/Shanghai",
+                        getDataSourceHost(),
+                        getDataSourcePort(),       // 通常是 9030
+                        getDataSourceServiceName() // Doris 里的库名
+                );
+                break;
+            default:
+                throw new IllegalStateException("Unsupported db type mode: " + dataSourceType);
+        }
+
+        return jdbcUrl;
+    }
+
+    public DataSource initDataSource(ConfigDataSourceConfig configDataSourceConfig){
+        HikariConfig hikariConfig = new HikariConfig();
+        hikariConfig.setDriverClassName(configDataSourceConfig.getDriverClassName());
+        hikariConfig.setJdbcUrl(configDataSourceConfig.getUrl());
+        hikariConfig.setUsername(configDataSourceConfig.getUsername());
+        hikariConfig.setPassword(configDataSourceConfig.getPassword());
+        hikariConfig.setMaximumPoolSize(10);
+        hikariConfig.setMinimumIdle(2);
+        hikariConfig.setConnectionTimeout(10000);
+        hikariConfig.setIdleTimeout(60000);
+        hikariConfig.setPoolName(configDataSourceConfig.getUsername() + "-config-db-pool");
+
+        return  new HikariDataSource(hikariConfig);
+    }
+
+    public DataSource initTargetDataSource( ){
+        HikariConfig hikariConfig = new HikariConfig();
+//        hikariConfig.setDriverClassName(configDataSourceConfig.getDriverClassName());
+        hikariConfig.setJdbcUrl(this.getUrl());
+        hikariConfig.setUsername(this.dataSourceUserName);
+        hikariConfig.setPassword(this.dataSourcePassword);
+        hikariConfig.setMaximumPoolSize(10);
+        hikariConfig.setMinimumIdle(2);
+        hikariConfig.setConnectionTimeout(10000);
+        hikariConfig.setIdleTimeout(60000);
+        hikariConfig.setPoolName(this.dataSourceUserName + "-config-db-pool");
+
+        return  new HikariDataSource(hikariConfig);
+    }
+
+
+    public TargetDataSourceConfig(String dataSourceId, String dataSourceOrg, String dataSourceHost, int dataSourcePort,
+                                  String dataSourceUserName, String dataSourcePassword, DatabaseType dataSourceType,
+                                  String dataSourceServiceName, LocalDateTime insertTime, LocalDateTime updateTime,
+                                  LocalDateTime deleteTime, String fgActive, String dataSourceDomain,
+                                  String dataSourceCategory, String sourceApp, String dataSourceName) {
+        this.dataSourceId = dataSourceId;
+        this.dataSourceOrg = dataSourceOrg;
+        this.dataSourceHost = dataSourceHost;
+        this.dataSourcePort = dataSourcePort;
+        this.dataSourceUserName = dataSourceUserName;
+        this.dataSourcePassword = dataSourcePassword;
+        this.dataSourceType = dataSourceType;
+        this.dataSourceServiceName = dataSourceServiceName;
+        this.insertTime = insertTime;
+        this.updateTime = updateTime;
+        this.deleteTime = deleteTime;
+        this.fgActive = fgActive;
+        this.dataSourceDomain = dataSourceDomain;
+        this.dataSourceCategory = dataSourceCategory;
+        this.sourceApp = sourceApp;
+        this.dataSourceName = dataSourceName;
+    }
+
+    public static Builder builder() {
+        return new Builder();
+    }
+
+    public static class Builder {
+        private final TargetDataSourceConfig instance = new TargetDataSourceConfig();
+
+        public Builder dataSourceId(String val) { instance.setDataSourceId(val); return this; }
+        public Builder dataSourceOrg(String val) { instance.setDataSourceOrg(val); return this; }
+        public Builder dataSourceHost(String val) { instance.setDataSourceHost(val); return this; }
+        public Builder dataSourcePort(int val) { instance.setDataSourcePort(val); return this; }
+        public Builder dataSourceUserName(String val) { instance.setDataSourceUserName(val); return this; }
+        public Builder dataSourcePassword(String val) { instance.setDataSourcePassword(val); return this; }
+        public Builder dataSourceType(DatabaseType val) { instance.setDataSourceType(val); return this; }
+        public Builder dataSourceServiceName(String val) { instance.setDataSourceServiceName(val); return this; }
+        public Builder insertTime(LocalDateTime val) { instance.setInsertTime(val); return this; }
+        public Builder updateTime(LocalDateTime val) { instance.setUpdateTime(val); return this; }
+        public Builder deleteTime(LocalDateTime val) { instance.setDeleteTime(val); return this; }
+        public Builder fgActive(String val) { instance.setFgActive(val); return this; }
+        public Builder dataSourceDomain(String val) { instance.setDataSourceDomain(val); return this; }
+        public Builder dataSourceCategory(String val) { instance.setDataSourceCategory(val); return this; }
+        public Builder sourceApp(String val) { instance.setSourceApp(val); return this; }
+        public Builder dataSourceName(String val) { instance.setDataSourceName(val); return this; }
+        public Builder serverId(String val) { instance.setServerId(val); return this; }
+
+        public TargetDataSourceConfig build() { return instance; }
+    }
+
+    // Getters and Setters
+    // （原有 Getter/Setter 保持不变）
+
+    public String getDataSourceId() { return dataSourceId; }
+    public void setDataSourceId(String dataSourceId) { this.dataSourceId = dataSourceId; }
+    public String getDataSourceOrg() { return dataSourceOrg; }
+    public void setDataSourceOrg(String dataSourceOrg) { this.dataSourceOrg = dataSourceOrg; }
+    public String getDataSourceHost() { return dataSourceHost; }
+    public void setDataSourceHost(String dataSourceHost) { this.dataSourceHost = dataSourceHost; }
+    public int getDataSourcePort() { return dataSourcePort; }
+    public void setDataSourcePort(int dataSourcePort) { this.dataSourcePort = dataSourcePort; }
+    public String getDataSourceUserName() { return dataSourceUserName; }
+    public void setDataSourceUserName(String dataSourceUserName) { this.dataSourceUserName = dataSourceUserName; }
+    public String getDataSourcePassword() { return dataSourcePassword; }
+    public void setDataSourcePassword(String dataSourcePassword) { this.dataSourcePassword = dataSourcePassword; }
+    public DatabaseType getDataSourceType() { return dataSourceType; }
+    public void setDataSourceType(DatabaseType dataSourceType) { this.dataSourceType = dataSourceType; }
+    public String getDataSourceServiceName() { return dataSourceServiceName; }
+    public void setDataSourceServiceName(String dataSourceServiceName) { this.dataSourceServiceName = dataSourceServiceName; }
+    public LocalDateTime getInsertTime() { return insertTime; }
+    public void setInsertTime(LocalDateTime insertTime) { this.insertTime = insertTime; }
+    public LocalDateTime getUpdateTime() { return updateTime; }
+    public void setUpdateTime(LocalDateTime updateTime) { this.updateTime = updateTime; }
+    public LocalDateTime getDeleteTime() { return deleteTime; }
+    public void setDeleteTime(LocalDateTime deleteTime) { this.deleteTime = deleteTime; }
+    public String getFgActive() { return fgActive; }
+    public void setFgActive(String fgActive) { this.fgActive = fgActive; }
+    public String getDataSourceDomain() { return dataSourceDomain; }
+    public void setDataSourceDomain(String dataSourceDomain) { this.dataSourceDomain = dataSourceDomain; }
+    public String getDataSourceCategory() { return dataSourceCategory; }
+    public void setDataSourceCategory(String dataSourceCategory) { this.dataSourceCategory = dataSourceCategory; }
+    public String getSourceApp() { return sourceApp; }
+    public void setSourceApp(String sourceApp) { this.sourceApp = sourceApp; }
+    public String getDataSourceName() { return dataSourceName; }
+    public void setDataSourceName(String dataSourceName) { this.dataSourceName = dataSourceName; }
+
+    public String getServerId() {
+        return serverId;
+    }
+
+    public void setServerId(String serverId) {
+        this.serverId = serverId;
+    }
+
+    public DatabaseInfo getDatabaseInfo() {
+        return databaseInfo;
+    }
+
+    public void setDatabaseInfo(DatabaseInfo databaseInfo) {
+        this.databaseInfo = databaseInfo;
+    }
+}

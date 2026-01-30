@@ -1,0 +1,73 @@
+client-info:
+  clientId: hosp001-home
+  version: 1.0
+  description: 总部测试
+  ip: 192.168.174.51          # 本机ip
+  flinkUiPort: 10011          # flink虚拟集群ui的端口号
+
+
+server:
+  port: 10010
+  servlet:
+    context-path: /sync-client
+
+config-db:
+  driver-class-name: oracle.jdbc.OracleDriver
+  url: jdbc:oracle:thin:@10.0.0.5:1521/orcl
+  username: CDC
+  password: CDC
+
+
+
+spring:
+  application:
+    name: OracleToKafka
+  main:
+    log-startup-info: true
+    banner-mode: "console"
+  output:
+    ansi:
+      enabled: NEVER
+
+# === 日志：控制台 + 文件（按天+大小滚动） ===
+logging:
+  file:
+    name: logs/sync-client.log
+  level:
+    root: INFO
+    org.apache.kafka: WARN
+    org.apache.kafka.clients: WARN
+    org.apache.kafka.clients.consumer: WARN
+    org.apache.kafka.clients.producer: WARN
+    org.apache.kafka.clients.consumer.ConsumerConfig: WARN
+    # 添加ZK监控相关日志级别
+    com.bsoft.server.zookeeper: INFO
+  logback:
+    rollingpolicy:
+      # 保持文件名一致性
+      file-name-pattern: logs/sync-client-%d{yyyy-MM-dd}.%i.log
+      max-file-size: 100MB
+      max-history: 30
+      total-size-cap: 10GB
+      clean-history-on-start: true
+  pattern:
+    console: "%d{yyyy-MM-dd HH:mm:ss.SSS} %-5level [%thread] %logger{36} - %msg%n"
+    file:    "%d{yyyy-MM-dd HH:mm:ss.SSS} %-5level [%thread] %logger{36} - %msg%n"
+# kafka地址配置
+kafka:
+  bootstrap:
+    servers: 192.168.174.51:9092
+
+
+state-backend:
+  checkpoint-path: file:///F:/flink-checkpoints/HOSP001
+  enable-incremental: false
+
+
+zookeeper:
+  connect-string: "10.0.0.5:2181"
+  session-timeout-ms: 30000        # 增加到30秒（3.4.14版本建议）
+  connection-timeout-ms: 10000     # 连接超时10秒
+  base-path: "/bsoft-cdc"
+  retry-count: 5                   # 增加重试次数
+  retry-interval-ms: 2000          # 增加重试间隔
