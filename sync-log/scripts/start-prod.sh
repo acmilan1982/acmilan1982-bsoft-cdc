@@ -1,0 +1,83 @@
+#!/bin/bash
+
+DIR="$(cd "$(dirname "$0")"; pwd)"
+APP_JAR="$DIR/sync-log-1.0-SNAPSHOT.jar"
+LIB_DIR="$DIR/lib"
+CONF_DIR="$DIR/config"
+LOG_DIR="$DIR/logs"
+
+[ -d "$LOG_DIR" ] || mkdir -p "$LOG_DIR"
+
+# 选 java：优先 JAVA_HOME，否则 PATH
+if [ -n "$JAVA_HOME" ] && [ -x "$JAVA_HOME/bin/java" ]; then
+  JAVA_EXE="$JAVA_HOME/bin/java"
+else
+  JAVA_EXE="java"
+fi
+
+# =====================================================
+# ✅ 方案1：JVM 堆内存优化（核心改动）
+# =====================================================
+JAVA_OPTS="${JAVA_OPTS} -Xms8g -Xmx8g"                # 保持总堆 32GB
+JAVA_OPTS="${JAVA_OPTS} -Dfile.encoding=UTF-8"
+JAVA_OPTS="${JAVA_OPTS} -Duser.timezone=Asia/Shanghai"
+
+# ✅ 使用 G1 GC（相比 Parallel GC 更适合大堆场景）
+JAVA_OPTS="${JAVA_OPTS} -XX:+UseG1GC"
+
+# ✅ 优化 Young 区比例（默认 NewRatio=3 改为 1）
+# 原配置：Young 9.5GB / Old 21.6GB
+# 新配置：Young 16GB / Old 16GB
+JAVA_OPTS="${JAVA_OPTS} -XX:NewRatio=1"
+
+# ✅ Survivor 区比例（Eden:Survivor = 8:1）
+JAVA_OPTS="${JAVA_OPTS} -XX:SurvivorRatio=8"
+
+# ✅ G1 特定优化参数
+JAVA_OPTS="${JAVA_OPTS} -XX:MaxGCPauseMillis=200"          # 最大停顿时间 200ms
+JAVA_OPTS="${JAVA_OPTS} -XX:G1HeapRegionSize=16m"         # 堆区域大小 16MB
+JAVA_OPTS="${JAVA_OPTS} -XX:InitiatingHeapOccupancyPercent=45"  # Old Gen 达到 45% 触发并发标记
+JAVA_OPTS="${JAVA_OPTS} -XX:+ParallelRefProcEnabled"      # 并行处理 Reference 对象
+JAVA_OPTS="${JAVA_OPTS} -XX:ConcGCThreads=8"              # 并发 GC 线程数（CPU 核心数 1/4）
+
+
+# ✅ OOM 时自动生成堆转储
+JAVA_OPTS="${JAVA_OPTS} -XX:+HeapDumpOnOutOfMemoryError"
+JAVA_OPTS="${JAVA_OPTS} -XX:HeapDumpPath=$LOG_DIR/heapdump.hprof"
+
+# ✅ 优化大对象分配（避免频繁晋升到 Old Gen）
+JAVA_OPTS="${JAVA_OPTS} -XX:PretenureSizeThreshold=1m"    # 大于 1MB 的对象直接进入 Old Gen
+# =====================================================
+
+
+FIRST_JARS=$(ls -1 \
+  "$LIB_DIR"/flink-connector-debezium-*.jar \
+  "$LIB_DIR"/flink-connector-oracle-cdc-*.jar 2>/dev/null)
+
+OTHER_JARS=$(find "$LIB_DIR" -maxdepth 1 -name "*.jar" \
+  ! -name "flink-connector-debezium-*.jar" \
+  ! -name "flink-connector-oracle-cdc-*.jar" \
+  -printf "%p\n" | sort)
+
+# [MOD] 2) 组装 CP（用冒号拼接）
+CP="$APP_JAR"
+if [ -n "$FIRST_JARS" ]; then
+  CP="$CP:$(echo "$FIRST_JARS" | paste -sd: -)"
+fi
+if [ -n "$OTHER_JARS" ]; then
+  CP="$CP:$(echo "$OTHER_JARS" | paste -sd: -)"
+fi
+# =========================
+
+echo "Using: $JAVA_EXE"
+$JAVA_EXE -version
+
+echo "=== Launching Sync Server (PROD环境，后台运行，日志见 $LOG_DIR/.log) ==="
+
+echo "sync-log 已启动，日志见 $LOG_DIR/sync-log.log"
+nohup $JAVA_EXE $JAVA_OPTS -cp "$CP" com.bsoft.log.bootapp.LogApplication \
+  --spring.profiles.active=prod \
+  --spring.config.additional-location="$CONF_DIR/" \
+  > /dev/null 2>&1 &
+
+echo "sync-log 已启动，日志见 $LOG_DIR/sync-log.log"

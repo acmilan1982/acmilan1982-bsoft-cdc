@@ -28,7 +28,7 @@ JAVA_OPTS="${JAVA_OPTS} -XX:+UseG1GC"
 
 # ✅ 优化 Young 区比例（默认 NewRatio=3 改为 1）
 
-JAVA_OPTS="${JAVA_OPTS} -XX:NewRatio=1"
+JAVA_OPTS="${JAVA_OPTS} -XX:NewRatio:=1"
 
 # ✅ Survivor 区比例（Eden:Survivor = 8:1）
 JAVA_OPTS="${JAVA_OPTS} -XX:SurvivorRatio=8"
@@ -82,6 +82,6 @@ echo "=== Launching Sync Client (PROD环境，后台运行，日志见 $LOG_DIR/
 nohup $JAVA_EXE $JAVA_OPTS -cp "$CP" com.bsoft.client.bootapp.ClientApplication \
   --spring.profiles.active=prod \
   --spring.config.additional-location="$CONF_DIR/" \
-  >> "$LOG_DIR/sync-client.log" 2>&1 &
+  > /dev/null 2>&1 &
 
 echo "sync-client 已启动，日志见 $LOG_DIR/sync-client.log"

@@ -1,0 +1,89 @@
+client-info:
+  clientId: hosp-001           # 每个客户端的唯一标识，必须是唯一的,一旦设置后不能修改，因为与flink的检查点id相关，万一clientId变了，
+  # 会导致检查点无法恢复，建议使用医院编号或其他唯一标识符
+  version: 1.0
+  description: 总部测试        # 客户端描述信息，可以是任何字符串
+  ip: 192.168.0.94          # 客户端IP地址，要求可以被 配置端 访问
+  flinkUiPort: 12005         # Flink web UI端口
+  oracle-cdc-pre-requisites: false  # 是否检查当前业务库满足CDC的先决条件，建议开启
+
+
+
+server:
+  port: 12002               # spring boot服务端口
+  servlet:
+    context-path: /sync-client  # 设置服务的上下文路径，一般不需要修改
+
+config-db:                                       # 配置库的url
+  driver-class-name: oracle.jdbc.OracleDriver
+  url: jdbc:oracle:thin:@10.19.12.33:1521/orcl
+  username: CDC
+  password: CDC
+  maximum-pool-size: 10
+  minimum-idle: 2
+  connection-timeout: 30000
+  idle-timeout: 600000
+
+
+spring:
+  application:
+    name: OracleToKafka
+  main:
+    log-startup-info: true
+    banner-mode: "console"
+  output:
+    ansi:
+      enabled: NEVER
+
+
+# === 日志：控制台 + 文件（按天+大小滚动） ===
+logging:
+  file:
+    name: logs/sync-client.log
+  level:
+    root: INFO
+    org.apache.kafka: WARN
+    org.apache.kafka.clients: WARN
+    org.apache.kafka.clients.consumer: WARN
+    org.apache.kafka.clients.producer: WARN
+    org.apache.kafka.clients.consumer.ConsumerConfig: WARN
+    # 添加ZK监控相关日志级别
+    com.bsoft.server.zookeeper: INFO
+  logback:
+    rollingpolicy:
+      # 保持文件名一致性
+      file-name-pattern: logs/sync-client-%d{yyyy-MM-dd}.%i.log
+      max-file-size: 100MB
+      max-history: 30
+      total-size-cap: 10GB
+      clean-history-on-start: true
+  pattern:
+    console: "%d{yyyy-MM-dd HH:mm:ss.SSS} %-5level [%thread] %logger{36} - %msg%n"
+    file:    "%d{yyyy-MM-dd HH:mm:ss.SSS} %-5level [%thread] %logger{36} - %msg%n"
+
+
+# kafka地址配置
+kafka:
+  bootstrap:
+    servers: 192.168.1.11:9092
+
+#flinke检查点的位置
+#windows 下的路径
+state-backend:
+  checkpoint-path: file:///F:/flink-checkpoints/client
+  enable-incremental: false
+
+#linux 下的路径
+#state-backend:
+#  checkpoint-path: file:////home/user/bsoft-cdc/flink-checkpoints/servers
+#  enable-incremental: false
+
+
+
+zookeeper:
+  connect-string: "192.168.1.11:2181"
+  session-timeout-ms: 30000        # 增加到30秒（3.4.14版本建议）
+  connection-timeout-ms: 10000     # 连接超时10秒
+  base-path: "/bsoft-cdc"
+  retry-count: 5                   # 增加重试次数
+  retry-interval-ms: 2000          # 增加重试间隔

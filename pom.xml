@@ -13,6 +13,7 @@
         <module>sync-common</module>
         <module>sync-client</module>
         <module>sync-server</module>
+        <module>sync-log</module>
     </modules>
 
     <properties>

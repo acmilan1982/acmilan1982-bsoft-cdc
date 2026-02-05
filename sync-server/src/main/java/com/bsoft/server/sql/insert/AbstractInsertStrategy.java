@@ -269,9 +269,11 @@ public abstract class AbstractInsertStrategy  implements  InsertStrategy{
 
     }
 
+    int i;
     @Override
     public void executeSingleInsert(String tableName, KafkaPayload payload) throws Exception {
-
+        i++;
+        logger.error("executeSingleInsert: {}", i);
         // 获取数据并添加CDC字段
         Map<String, Object> afterData = payload.getAfterData();
 
@@ -297,14 +299,16 @@ public abstract class AbstractInsertStrategy  implements  InsertStrategy{
 
         try (Connection conn = this.dataSourceHolder.getDataSource().getConnection();
              PreparedStatement ps = conn.prepareStatement(sql)) {
-
+            logger.info("afterData: {}", afterData);
             // 设置参数
             setParameters(ps, afterData, fieldList, dateFieldSet);
+
 
             // 执行插入
             ps.executeUpdate();
 
         } catch (SQLException e) {
+            e.getMessage();
             logger.error("单条插入失败: {}", e.getMessage());
             throw e;
         }

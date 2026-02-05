@@ -3,7 +3,7 @@ client-info:
                               # 会导致检查点无法恢复，建议使用医院编号或其他唯一标识符
   version: 1.0
   description: 总部测试        # 客户端描述信息，可以是任何字符串
-  ip: 192.168.1.176          # 客户端IP地址，要求可以被 配置端 访问
+  ip: 192.168.0.94          # 客户端IP地址，要求可以被 配置端 访问
   flinkUiPort: 12005         # Flink web UI端口
   oracle-cdc-pre-requisites: false  # 是否检查当前业务库满足CDC的先决条件，建议开启
 
