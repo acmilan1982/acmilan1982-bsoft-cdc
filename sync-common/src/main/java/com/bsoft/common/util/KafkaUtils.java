@@ -71,6 +71,29 @@ public class KafkaUtils {
         }
     }
 
+    public  void createKafkaTopicsIfNotExists(String topic) {
+
+        Properties props = new Properties();
+        props.put("bootstrap.servers", KAFKA_BOOTSTRAP_SERVERS);
+
+        try (AdminClient adminClient = AdminClient.create(props)) {
+            Set<String> existingTopics = adminClient.listTopics().names().get();
+            List<NewTopic> newTopics = new ArrayList<>();
+
+            if (!existingTopics.contains(topic)) {
+                System.out.println("[初始化] Kafka Topic不存在，自动创建: " + topic);
+
+                newTopics.add(new NewTopic(topic, 1, (short) 1));
+            }
+
+            if (!newTopics.isEmpty()) {
+                adminClient.createTopics(newTopics);
+            }
+        } catch (Exception e) {
+            throw new RuntimeException("Kafka Topic 创建失败", e);
+        }
+    }
+
 
     // 检查指定主题是否存在，不存在则等待
     public void waitUntilTopicExists(List<String> topics) {

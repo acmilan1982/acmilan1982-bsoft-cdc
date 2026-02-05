@@ -163,7 +163,7 @@ public class MySQLDDLStrategy extends AbstractDDLStrategy {
 //                sb.append(",\n  PRIMARY KEY (").append(String.join(", ", primaryKeys)).append(")");
 //            }
 
-            sb.append("\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;\n");
+            sb.append("\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;\n");
 
             // 添加索引语句
             for (String indexStmt : indexStatements) {

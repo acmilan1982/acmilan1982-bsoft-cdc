@@ -25,14 +25,15 @@ public  class MySQLAdapter extends AbstractDatabaseAdapter  {
     public void setParameterValue(PreparedStatement ps, int index, Object value,
                                      String fieldName, Set<String> dateFieldSet) throws SQLException {
         try {
-            if (dateFieldSet.contains(fieldName.toUpperCase()) && value != null) {
+            if (dateFieldSet.contains(fieldName.toLowerCase()) && value != null) {
                 // 处理时间戳转换
-                Date dateValue = convertTimestampToDate(value);
-                ps.setTimestamp(index, new java.sql.Timestamp(dateValue.getTime()));
+                String dateTimeText = fastParseDateForKafka(value); // 统一输出 "yyyy-MM-dd HH:mm:ss" 或 null
+                ps.setString(index, dateTimeText);
             } else {
                 ps.setObject(index, value);
             }
         } catch (Exception e) {
+            e.printStackTrace();
             // 异常情况下尝试时间戳转换
             Date dateValue = convertTimestampToDate(value);
             ps.setTimestamp(index, new java.sql.Timestamp(dateValue.getTime()));

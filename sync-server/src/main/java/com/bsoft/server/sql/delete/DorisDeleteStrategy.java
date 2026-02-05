@@ -33,40 +33,37 @@ public class DorisDeleteStrategy extends AbstractDeleteStrategy {
     public DorisDeleteStrategy() {
     }
 
-    public DorisDeleteStrategy(TargetDataSourceConfig targetDataSourceConfig) {
-        super(targetDataSourceConfig);
+    public DorisDeleteStrategy(TargetDataSourceConfig targetDataSourceConfig,TableRowDeleteStrategy tableRowDeleteStrategy) {
+        super(targetDataSourceConfig,tableRowDeleteStrategy);
     }
 
-//    @Override
-//    public String buildDeleteSql(String tableName, Set<String> primaryKeys, TableRowDeleteStrategy deleteStrategy) {
-//        if (primaryKeys == null || primaryKeys.isEmpty()) {
-//            throw new IllegalArgumentException("Primary key set is empty, unsafe to delete from table: " + tableName);
-//        }
-//
-//        // 生成 WHERE 子句：`pk1` = ? AND `pk2` = ? ...
-//        String whereClause = primaryKeys.stream()
-//                .map(pk -> quote(pk) + " = ?")
-//                .collect(Collectors.joining(" AND "));
-//
-//        switch (deleteStrategy) {
-//            case DELETE:
-//                // 物理删除
-//                return String.format("DELETE FROM %s WHERE %s", quote(tableName), whereClause);
-//
-//            case DELETE_FLAG:
-//                // 逻辑删除（字段名可按你的表结构调整为 cdc_delete_flag / cdc_delete_time 等）
-//                return String.format(
-//                        "UPDATE %s SET %s = 1, %s = NOW() WHERE %s",
-//                        quote(tableName),
-//                        quote("cdc_delete_flag"),
-//                        quote("cdc_delete_time"),
-//                        whereClause
-//                );
-//
-//            default:
-//                throw new IllegalArgumentException("不支持的删除策略: " + deleteStrategy);
-//        }
-//    }
+    @Override
+    public String buildDeleteSql(String tableName, Set<String> primaryKeySet) {
+        // 没有主键，无法安全删除
+        validatePrimaryKeySet(tableName,primaryKeySet);
+        // WHERE：固定顺序（字典序），避免 Set 迭代顺序漂移
+        String whereClause = buildWhereClause(primaryKeySet);
+
+
+        switch (tableRowDeleteStrategy) {
+            case DELETE:
+                // 物理删除
+                return String.format("delete from %s where %s", quote(tableName), whereClause);
+
+            case DELETE_FLAG:
+                // 逻辑删除（字段名可按你的表结构调整为 cdc_delete_flag / cdc_delete_time 等）
+                return String.format(
+                        "update %s set cdc_op = 'd' ,%s = 1, %s = NOW() where %s",
+                        quote(tableName),
+                        quote("cdc_delete_flag"),
+                        quote("cdc_delete_time"),
+                        whereClause
+                );
+
+            default:
+                throw new IllegalArgumentException("不支持的删除策略: " + tableRowDeleteStrategy);
+        }
+    }
 //
 //    @Override
 //    public void setParameters(PreparedStatement ps,
@@ -80,10 +77,10 @@ public class DorisDeleteStrategy extends AbstractDeleteStrategy {
 //            ps.setObject(index++, value);
 //        }
 //    }
-//
-//    /** 反引号转义，兼容 Doris(MySQL 协议) */
-//    private String quote(String ident) {
-//        if (ident == null) return "``";
-//        return "`" + ident.replace("`", "") + "`";
-//    }
+
+    /** 反引号转义，兼容 Doris(MySQL 协议) */
+    private String quote(String ident) {
+        if (ident == null) return "``";
+        return "`" + ident.replace("`", "") + "`";
+    }
 }

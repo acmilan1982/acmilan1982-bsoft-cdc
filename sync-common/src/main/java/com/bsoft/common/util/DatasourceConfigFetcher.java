@@ -441,7 +441,7 @@ public class DatasourceConfigFetcher {
                         dbInfo = parseDorisVersion(fullVersion);
                         break;
                     case MYSQL:
-
+                        dbInfo = new DatabaseInfo(DatabaseType.MYSQL, fullVersion);
                         break;
                     default:
                         throw new RuntimeException("不支持的数据库类型: " + targetDataSourceConfig.getDataSourceType());

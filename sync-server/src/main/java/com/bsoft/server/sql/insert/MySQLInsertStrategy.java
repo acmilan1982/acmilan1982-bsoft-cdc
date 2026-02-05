@@ -35,7 +35,7 @@ public class MySQLInsertStrategy extends AbstractInsertStrategy  {
         String placeholders = keys.stream().map(k -> "?").collect(Collectors.joining(","));
 
         // MySQL使用INSERT IGNORE来处理重复键冲突
-        return String.format("INSERT IGNORE INTO %s (%s) VALUES (%s)",
+        return String.format("INSERT  INTO %s (%s) VALUES (%s)",
                 tableName, columns, placeholders);
     }
 

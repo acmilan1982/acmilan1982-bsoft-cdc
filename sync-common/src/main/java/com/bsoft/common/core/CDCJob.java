@@ -1,9 +1,6 @@
 package com.bsoft.common.core;
 
-import com.bsoft.common.bean.ClientInfo;
-import com.bsoft.common.bean.ExecutionPlan;
-import com.bsoft.common.bean.ServerInfo;
-import com.bsoft.common.bean.TopicInfoRegistry;
+import com.bsoft.common.bean.*;
 import com.bsoft.common.enums.JobStatus;
 import com.bsoft.common.global.GlobalZooKeeperManager;
 import com.bsoft.common.util.ZooKeeperNodeManager;
@@ -30,7 +27,9 @@ public class CDCJob {
     @Autowired
     protected ServerInfo serverInfo;
 
-
+    // 客户端信息
+    @Autowired
+    protected LogServerInfo logServerInfo;
 
     // 主题信息注册中心
     protected TopicInfoRegistry topicInfoRegistry = new TopicInfoRegistry();

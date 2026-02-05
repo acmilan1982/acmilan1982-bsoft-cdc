@@ -2,6 +2,7 @@ package com.bsoft.server.sql.delete;
 
 import com.bsoft.common.bean.KafkaPayload;
 import com.bsoft.common.bean.TargetDataSourceConfig;
+import com.bsoft.common.enums.TableRowDeleteStrategy;
 import com.bsoft.common.util.CdcSqlConstants;
 import com.bsoft.server.sql.adapter.DataSourceHolder;
 import org.apache.logging.log4j.LogManager;
@@ -30,12 +31,44 @@ public abstract class AbstractDeleteStrategy implements DeleteStrategy {
 
     protected DataSourceHolder dataSourceHolder;
 
+    protected TableRowDeleteStrategy tableRowDeleteStrategy;
+
 
     public AbstractDeleteStrategy() {
     }
 
-    protected AbstractDeleteStrategy(TargetDataSourceConfig targetDataSourceConfig) {
+    protected AbstractDeleteStrategy(TargetDataSourceConfig targetDataSourceConfig, TableRowDeleteStrategy tableRowDeleteStrategy) {
         this.dataSourceHolder = new DataSourceHolder(targetDataSourceConfig) ;
+        this.tableRowDeleteStrategy = tableRowDeleteStrategy;
+    }
+
+
+    /**
+     * 校验主键集合是否为空
+     *
+     * @param tableName      表名
+     * @param primaryKeySet  主键集合
+     * @throws IllegalArgumentException 当主键集合为空时抛出
+     */
+    protected void validatePrimaryKeySet(String tableName, Set<String> primaryKeySet) {
+        if (primaryKeySet.isEmpty()) {
+            throw new IllegalArgumentException("Primary key set is empty, unsafe to delete from table: " + tableName);
+        }
+    }
+
+    /**
+     * 构建 WHERE 子句（按字典序排列主键，避免 SQL 缓存失效）
+     *
+     * @param primaryKeySet 主键集合
+     * @return WHERE 子句（如：pk1 = ? AND pk2 = ?）
+     */
+    protected String buildWhereClause(Set<String> primaryKeySet) {
+        List<String> primaryKeyList = new ArrayList<>(primaryKeySet);
+        primaryKeyList.sort(String::compareTo);
+
+        return primaryKeyList.stream()
+                .map(pk -> pk + " = ?")
+                .collect(Collectors.joining(" and "));
     }
 
 

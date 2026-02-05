@@ -41,7 +41,7 @@ public class BatchSizeManager implements Serializable {
     // Doris Stream Load 相关配置
     private static final int DEFAULT_STREAM_LOAD_BATCH_SIZE = 1000;
     private static final int MIN_STREAM_LOAD_BATCH_SIZE = 500;
-    private static final int MAX_STREAM_LOAD_BATCH_SIZE = 2000;
+    private static final int MAX_STREAM_LOAD_BATCH_SIZE = 10000;
     private static final long TARGET_BATCH_BYTES = 100 * 1024 * 1024; // 100MB目标大小
 
 

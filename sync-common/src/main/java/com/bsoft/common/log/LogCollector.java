@@ -50,7 +50,7 @@ public class LogCollector {
     private static final long ERROR_FLUSH_INTERVAL_MS = 1 * 60 * 1000;
 
     // ==================== 定时刷新配置 ====================
-    private final ScheduledExecutorService flushScheduler;
+    private  ScheduledExecutorService flushScheduler;
 
 
     // ==================== 批量写入线程池 ====================
@@ -69,8 +69,8 @@ public class LogCollector {
             new ThreadPoolExecutor.CallerRunsPolicy()  // 拒绝策略
     );
 
-    private static final int SUB_BATCH_SIZE = 30000;  // 每个子任务处理的日志数
-    private static final int BATCH_COMMIT_SIZE = 2000; // 每个子任务每次批量提交的大小
+    private static final int SUB_BATCH_SIZE = 10000;  // 每个子任务处理的日志数
+    private static final int BATCH_COMMIT_SIZE = 1000; // 每个子任务每次批量提交的大小
 
     // ==================== 刷新控制标志 ====================
     private volatile long lastCorrectFlushTime = System.currentTimeMillis();
@@ -78,7 +78,12 @@ public class LogCollector {
     private final AtomicBoolean running = new AtomicBoolean(true);
 
     // ==================== 数据源配置 ====================
-    private final DataSource dataSource;
+    private DataSource dataSource;
+
+
+    private static final int MAX_PENDING_TASK_COUNT = 16;
+    private static final int MAX_ADD_RETRIES = 32; // 最多等待 1 分钟
+
 
     /**
      * 原始消息存储策略
@@ -90,12 +95,25 @@ public class LogCollector {
     // ✅ 为每个 LogCollector 实例生成唯一标识
     private final String instanceId;
 
-    public LogCollector(ConfigDataSourceConfig configDataSourceConfig,RawMessageStorageStrategy rawMessageStorageStrategy) {
+    public LogCollector() {
+        this.instanceId = UUID.randomUUID().toString().substring(0, 8);
+    }
+
+    public LogCollector(ConfigDataSourceConfig configDataSourceConfig) {
+        this();
+        this.dataSource = configDataSourceConfig.initDataSource();
+        initScheduler();
+    }
+
+    public LogCollector(ConfigDataSourceConfig configDataSourceConfig, RawMessageStorageStrategy rawMessageStorageStrategy) {
+        this();
         this.dataSource = configDataSourceConfig.initDataSource();
         this.rawMessageStorageStrategy = rawMessageStorageStrategy;
-        this.instanceId = UUID.randomUUID().toString().substring(0, 8);
+        initScheduler();
+    }
+    private void initScheduler() {
+        logger.info("实例化LogCollector: {}", instanceId);
 
-        logger.info("实例化LogCollector: {} ", instanceId);
         this.flushScheduler = Executors.newSingleThreadScheduledExecutor(r -> {
             Thread t = new Thread(r, "log-flush-scheduler");
             t.setDaemon(true);
@@ -110,14 +128,46 @@ public class LogCollector {
         logger.info("✅ LogCollector 已启动: instanceId={}", instanceId);
     }
 
-
     // ==================== 添加日志====================
-    public void add(SyncLogEntry entry) {
-        if (entry.getResultCode() == 0) {
-            correctQueue.offer(entry);
-        } else {
-            errorQueue.offer(entry);
+    public void add(SyncLogEntry entry) throws TimeoutException, InterruptedException {
+        BlockingQueue<SyncLogEntry> queue = (entry.getResultCode() == 0) ? correctQueue : errorQueue;
+
+
+        int retryCount = 0;
+
+
+        while (getPendingTaskCount() >= MAX_PENDING_TASK_COUNT) {
+            retryCount++;
+
+            //  1. 记录告警日志
+            logger.warn("⚠写入线程池繁忙(待处理任务={}/{}),等待第 {}/{} 次重试...",
+                    getPendingTaskCount(), MAX_PENDING_TASK_COUNT, retryCount, MAX_ADD_RETRIES);
+
+
+            //  2. 检查死锁
+            if (batchExecutor.isShutdown()) {
+                throw new IllegalStateException("写入线程池已关闭");
+            }
+
+            //  3. 防止永久阻塞
+            if (retryCount >= MAX_ADD_RETRIES) {
+                throw new TimeoutException("队列长时间堵塞,疑似死锁");
+            }
+
+
+            Thread.sleep(16000);
         }
+
+        queue.offer(entry);
+    }
+
+    // ✅获取待处理任务数
+    private int getPendingTaskCount() {
+        if (batchExecutor instanceof ThreadPoolExecutor) {
+            ThreadPoolExecutor executor = (ThreadPoolExecutor) batchExecutor;
+            return executor.getQueue().size();
+        }
+        return 0;
     }
 
     public void add(List<SyncLogEntry> syncLogEntries ) {
@@ -193,7 +243,7 @@ public class LogCollector {
 
     // ==================== 批量写入数据库 ====================
     private void flush(BlockingQueue<SyncLogEntry> queue,String sql, String tableName) {
-        List<SyncLogEntry> batch = new ArrayList<>(160000);
+        List<SyncLogEntry> batch = new ArrayList<>(100000);
 
         logger.info("correctQueue待写入日志----------------------->{} 个SyncLogEntry对象", this.correctQueue.size());
 
@@ -206,11 +256,11 @@ public class LogCollector {
             int poolSize = executor.getPoolSize();            // 总线程数
             int idleThreads = poolSize - activeThreads;       // 空闲线程
 
-            logger.warn("CORRECT日志队列待处理任务个数={},每个任务至多{}条记录,活动线程={}, 空闲线程={}, 总线程={}",
+            logger.warn("CORRECT日志队列待处理个数={},每个任务至多{}条记录,活动线程={}, 空闲线程={}, 总线程={}",
                     size, SUB_BATCH_SIZE, activeThreads, idleThreads, poolSize);
         }
 
-        queue.drainTo(batch, 160000);
+        queue.drainTo(batch, 100000);
 
         if (batch.isEmpty()) {
             return;
@@ -269,11 +319,11 @@ public class LogCollector {
                         .count();
             }
 
-            logger.info("✅ 子任务完成: 表={}, 成功={}/{}, 耗时={}ms",
+            logger.info("LogCollector子任务完成: 表={}, 成功插入日志={}/{}条, 耗时={}ms",
                     tableName, successCount, batch.size(),
                     System.currentTimeMillis() - startTime);
         } catch (Exception e) {
-            logger.error("❌ 子任务失败: 表={}, 错误={}", tableName, e.getMessage());
+            logger.error("LogCollector子任务失败: 表={}, 错误={}", tableName, e.getMessage());
         }
     }
 

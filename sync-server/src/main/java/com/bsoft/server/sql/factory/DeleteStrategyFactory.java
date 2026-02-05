@@ -13,6 +13,7 @@ package com.bsoft.server.sql.factory;
 import com.bsoft.common.bean.DatabaseInfo;
 import com.bsoft.common.bean.TargetDataSourceConfig;
 import com.bsoft.common.enums.DatabaseType;
+import com.bsoft.common.enums.TableRowDeleteStrategy;
 import com.bsoft.server.sql.delete.DeleteStrategy;
 import com.bsoft.server.sql.delete.DorisDeleteStrategy;
 import com.bsoft.server.sql.delete.MySQLDeleteStrategy;
@@ -34,9 +35,9 @@ public class DeleteStrategyFactory {
 
 
     // 根据数据库信息获取对应的插入策略
-    public static DeleteStrategy getStrategy(TargetDataSourceConfig targetDataSourceConfig) {
+    public static DeleteStrategy getStrategy(TargetDataSourceConfig targetDataSourceConfig, TableRowDeleteStrategy tableRowDeleteStrategy) {
         return STRATEGY_CACHE.computeIfAbsent(targetDataSourceConfig.getDataSourceId(), info -> {
-            DeleteStrategy strategy = createStrategy(targetDataSourceConfig);
+            DeleteStrategy strategy = createStrategy(targetDataSourceConfig,tableRowDeleteStrategy);
             return strategy;
         });
     }
@@ -44,14 +45,14 @@ public class DeleteStrategyFactory {
     /**
      * 创建策略实例
      */
-    private static DeleteStrategy createStrategy(TargetDataSourceConfig targetDataSourceConfig) {
+    private static DeleteStrategy createStrategy(TargetDataSourceConfig targetDataSourceConfig,TableRowDeleteStrategy tableRowDeleteStrategy) {
         switch (targetDataSourceConfig.getDatabaseInfo().getType()) {
             case MYSQL:
-                return new MySQLDeleteStrategy(targetDataSourceConfig);
+                return new MySQLDeleteStrategy(targetDataSourceConfig,tableRowDeleteStrategy);
             case ORACLE:
-                return new OracleDeleteStrategy(targetDataSourceConfig);
+                return new OracleDeleteStrategy(targetDataSourceConfig,tableRowDeleteStrategy);
             case DORIS:
-                return new DorisDeleteStrategy(targetDataSourceConfig);
+                return new DorisDeleteStrategy(targetDataSourceConfig,tableRowDeleteStrategy);
             default:
                 throw new IllegalArgumentException("不支持的数据库类型: " + targetDataSourceConfig.getDatabaseInfo().getType());
         }

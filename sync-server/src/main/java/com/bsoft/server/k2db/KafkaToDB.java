@@ -6,30 +6,34 @@ import com.bsoft.common.core.CDCJob;
 import com.bsoft.common.enums.JobStatus;
 import com.bsoft.common.enums.WindowTimeUnit;
 import com.bsoft.common.global.GlobalLogCollectorManager;
+import com.bsoft.common.global.GlobalZooKeeperManager;
 import com.bsoft.common.util.DatasourceConfigFetcher;
 import com.bsoft.common.util.JobIdUtil;
 import com.bsoft.common.util.KafkaUtils;
-import com.bsoft.server.api.ClientHTTPClient;
 import com.bsoft.server.api.ServerController;
 import com.bsoft.server.function.OperationResultStatsAggregator;
 import com.bsoft.server.function.OperationResultWindowFunction;
 import com.bsoft.server.sink.OperationResultStatisticsSink;
-import com.bsoft.server.sink.ZooKeeperStatisticsSink;
-import com.bsoft.common.global.GlobalZooKeeperManager;
 import org.apache.flink.api.common.eventtime.WatermarkStrategy;
+import org.apache.flink.api.common.serialization.SimpleStringSchema;
 import org.apache.flink.configuration.Configuration;
 import org.apache.flink.configuration.RestOptions;
+import org.apache.flink.connector.base.DeliveryGuarantee;
+import org.apache.flink.connector.kafka.sink.KafkaRecordSerializationSchema;
+import org.apache.flink.connector.kafka.sink.KafkaSink;
 import org.apache.flink.connector.kafka.source.KafkaSource;
 import org.apache.flink.connector.kafka.source.enumerator.initializer.OffsetsInitializer;
 import org.apache.flink.core.fs.Path;
 import org.apache.flink.runtime.state.hashmap.HashMapStateBackend;
 import org.apache.flink.streaming.api.CheckpointingMode;
+import org.apache.flink.streaming.api.datastream.DataStream;
 import org.apache.flink.streaming.api.datastream.DataStreamSource;
 import org.apache.flink.streaming.api.datastream.SingleOutputStreamOperator;
 import org.apache.flink.streaming.api.environment.CheckpointConfig;
 import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
 import org.apache.flink.streaming.api.windowing.assigners.SlidingProcessingTimeWindows;
 import org.apache.flink.streaming.api.windowing.time.Time;
+import org.apache.flink.util.OutputTag;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -78,6 +82,8 @@ public class KafkaToDB  extends CDCJob {
 
     @Autowired
     private ServerController serverController;
+
+    private String serverLogTopic = "sync_server_logs";
 
 //    @Autowired
 //    private ClientHTTPClient clientHTTPClient;
@@ -146,9 +152,9 @@ public class KafkaToDB  extends CDCJob {
 
         // 4. 生成需要读取主题信息，包括每个主题的数据最终写入哪个目标库的哪个表
         topicInfoRegistry.registerServerTopicInfo(executionPlan.generateServerTopicInfo(businessDataSourceConfigRegistry,
-                                                                                        targetDataSourceConfigRegistry,
-                                                                                        serverInfo,
-                                                                                        configFetcher));
+                targetDataSourceConfigRegistry,
+                serverInfo,
+                configFetcher));
 
 
 
@@ -162,6 +168,7 @@ public class KafkaToDB  extends CDCJob {
         kafkaUtils.waitUntilTopicExists(topics);
 
 
+        kafkaUtils.createKafkaTopicsIfNotExists(this.serverLogTopic);
 
         // 6. 设置一个启动时间
         serverInfo.notifyClientStart();
@@ -218,7 +225,11 @@ public class KafkaToDB  extends CDCJob {
         configureCheckpointing(env);
 
 
+        // 定义侧输出标签，用于输入日志
+        OutputTag<String> syncLogEntryOutputTag = new OutputTag<String>("sync-server-log-side-output") {};
 
+        // 收集所有日志侧输出流
+        List<DataStream<String>> allLogStreams = new ArrayList<>();
         // 读取每个主题的数据
         for (ClientTopicInfo topicInfo : topicInfoRegistry.getServerTopicInfoList()) {
 
@@ -257,8 +268,14 @@ public class KafkaToDB  extends CDCJob {
                         return isValid;
                     })
                     .name("filter-" + kafkaTopic).uid("filter-" + kafkaTopic)
-                    .process(new DatabaseRichProcessBatchFunction(serverInfo,serverTopicInfo)) // 使用ProcessFunction处理写入
+                    .process(new DatabaseRichProcessBatchFunction(serverInfo,serverTopicInfo,syncLogEntryOutputTag)) // 使用ProcessFunction处理写入
                     .name("target-writer-" + kafkaTopic).uid("target-writer-" + kafkaTopic);
+
+
+            // 收集获取控制流（侧输出流）
+            DataStream<String> syncLogEntryDataStream = operationResults.getSideOutput(syncLogEntryOutputTag);
+            allLogStreams.add(syncLogEntryDataStream);
+
 
 
 //          // 配置统计窗口,长度为一天，步长100分钟
@@ -270,6 +287,16 @@ public class KafkaToDB  extends CDCJob {
 
 
         }
+
+        //  合并所有日志流后统一 sink(只创建 1 个 KafkaSink)
+        if (!allLogStreams.isEmpty()) {
+            DataStream<String> mergedLogStream = allLogStreams.get(0);
+            for (int i = 1; i < allLogStreams.size(); i++) {
+                mergedLogStream = mergedLogStream.union(allLogStreams.get(i));
+            }
+            sinkSyncLogsToKafka(mergedLogStream); // ✅ 只调用一次
+        }
+
 
         // 添加JVM关闭钩子，确保应用关闭时提交所有offset
         Runtime.getRuntime().addShutdownHook(new Thread(() -> {
@@ -429,6 +456,39 @@ public class KafkaToDB  extends CDCJob {
             e.printStackTrace();
             throw new RuntimeException(e);
         }
+    }
+
+    public void sinkSyncLogsToKafka(DataStream<String> syncLogEntryDataStream) {
+        // 为每个侧输出流创建 Kafka Sink
+        syncLogEntryDataStream
+                .sinkTo(KafkaSink.<String>builder()
+                        .setBootstrapServers(kafkaUtils.getKafkaBootstrapServers())
+                        .setRecordSerializer(KafkaRecordSerializationSchema.builder()
+                                .setTopic(this.serverLogTopic)
+                                .setValueSerializationSchema(new SimpleStringSchema())
+                                .build())
+                        .setDeliverGuarantee(DeliveryGuarantee.AT_LEAST_ONCE)
+                        //  连接管理配置(防止频繁创建/销毁连接)
+                        .setProperty("connections.max.idle.ms", "540000") // 9分钟空闲超时
+                        .setProperty("max.block.ms", "60000")
+                        .setProperty("metadata.max.age.ms", "300000") // 5分钟刷新元数据
+                        // 性能优化配置
+                        .setProperty("batch.size", "262144") // 增加批大小到64KB
+                        .setProperty("linger.ms", "100") // 增加等待时间
+                        .setProperty("buffer.memory", "67108864") // 64MB缓冲区内存
+                        .setProperty("compression.type", "lz4") // 启用LZ4压缩
+                        // 无限重试配置
+                        .setProperty("retries", String.valueOf(Integer.MAX_VALUE))
+                        .setProperty("retry.backoff.ms", "1000")
+                        .setProperty("reconnect.backoff.ms", "1000")
+                        .setProperty("reconnect.backoff.max.ms", "10000")
+                        .setProperty("request.timeout.ms", "30000")
+                        .setProperty("delivery.timeout.ms", String.valueOf(Integer.MAX_VALUE))
+                        .setProperty("acks", "1")
+                        .build())
+//                    .uid(clientId + "-sink-" + topic)
+                .name("KafkaSink-" + this.serverLogTopic);
+
     }
 
 }

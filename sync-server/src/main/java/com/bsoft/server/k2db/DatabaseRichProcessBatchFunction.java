@@ -5,30 +5,29 @@ import com.alibaba.druid.sql.ast.statement.*;
 import com.alibaba.druid.sql.dialect.oracle.ast.stmt.OracleAlterTableModify;
 import com.alibaba.druid.sql.dialect.oracle.parser.OracleStatementParser;
 import com.bsoft.common.bean.*;
-import com.bsoft.common.ds.SharedHikariPool;
 import com.bsoft.common.enums.DatabaseType;
 import com.bsoft.common.enums.TableRowDeleteStrategy;
 import com.bsoft.common.global.GlobalLogCollectorManager;
 import com.bsoft.common.global.GlobalZooKeeperManager;
 import com.bsoft.common.log.LogCollector;
-import com.bsoft.common.util.CdcSqlConstants;
+import com.bsoft.common.log.LogCollector;
 import com.bsoft.common.util.DateFormatUtils;
 import com.bsoft.common.util.DateTimeConstants;
 import com.bsoft.server.api.ClientHTTPClient;
-import com.bsoft.server.sql.factory.*;
-import com.bsoft.server.sql.insert.http.DorisConnectionInfo;
-import com.bsoft.server.sql.insert.http.StreamLoadResult;
 import com.bsoft.server.batch.BatchInsertItem;
 import com.bsoft.server.batch.BatchSizeManager;
 import com.bsoft.server.sql.ddl.DDLStrategy;
 import com.bsoft.server.sql.delete.DeleteStrategy;
+import com.bsoft.server.sql.factory.*;
 import com.bsoft.server.sql.insert.InsertStrategy;
 import com.bsoft.server.sql.select.SelectStrategy;
 import com.bsoft.server.sql.update.UpdateStrategy;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.zaxxer.hikari.HikariConfig;
 import org.apache.flink.configuration.Configuration;
 import org.apache.flink.streaming.api.functions.ProcessFunction;
 import org.apache.flink.util.Collector;
+import org.apache.flink.util.OutputTag;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 
@@ -66,8 +65,8 @@ public class DatabaseRichProcessBatchFunction extends ProcessFunction<KafkaPaylo
     // 用于写入当前消息的偏移量
     private transient GlobalZooKeeperManager offsetManager;
 
-    // 移除原有的 LogCollector logCollector 字段
-    private transient LogCollector logCollector;
+//    // 移除原有的 LogCollector logCollector 字段
+//    private transient LogCollector logCollector;
 
 
     //---------------快照数据批处理相关----------------
@@ -129,10 +128,17 @@ public class DatabaseRichProcessBatchFunction extends ProcessFunction<KafkaPaylo
     private static final int MAX_EXPANSION_RETRIES = 10; // 最多重试10次，共30分钟
 
 
+    // 定义侧输出标签，用于输入日志
+    private  OutputTag<String> SYNC_SERVER_LOG_TAG;
+
+    // 日志缓冲队列
+    private final Queue<SyncLogEntry> logQueue = new ConcurrentLinkedQueue<>();
+
+    private static final ObjectMapper mapper = new ObjectMapper();
 
 
     // 每个DatabaseRichProcessFunction，只写入指定目标库中的指定表(只会写入一个表)
-    public DatabaseRichProcessBatchFunction(ServerInfo serverInfo, ServerTopicInfo serverTopicInfo ) {
+    public DatabaseRichProcessBatchFunction(ServerInfo serverInfo, ServerTopicInfo serverTopicInfo,OutputTag<String> SYNC_SERVER_LOG_TAG ) {
 
         this.serverInfo = serverInfo;
         this.serverTopicInfo = serverTopicInfo;
@@ -153,7 +159,7 @@ public class DatabaseRichProcessBatchFunction extends ProcessFunction<KafkaPaylo
                 targetDataSourceConfig.getDataSourceType() == DatabaseType.DORIS ? -1 : snapshotBatchSize
         );
 
-
+        this.SYNC_SERVER_LOG_TAG = SYNC_SERVER_LOG_TAG;
 
     }
 
@@ -173,7 +179,7 @@ public class DatabaseRichProcessBatchFunction extends ProcessFunction<KafkaPaylo
         this.insertStrategy = InsertStrategyFactory.getStrategy(targetDataSourceConfig);
 
         // 3.获取删除策略对象
-        this.deleteStrategy = DeleteStrategyFactory.getStrategy(targetDataSourceConfig);
+        this.deleteStrategy = DeleteStrategyFactory.getStrategy(targetDataSourceConfig,tableRowDeleteStrategy);
 
         // 4.获取更新策略对象
         this.updateStrategy = UpdateStrategyFactory.getStrategy(targetDataSourceConfig);
@@ -187,10 +193,10 @@ public class DatabaseRichProcessBatchFunction extends ProcessFunction<KafkaPaylo
 
 
         // 11.使用全局共享的 LogCollector
-        this.logCollector = GlobalLogCollectorManager.getInstance(
-                this.serverInfo.getConfigDataSourceConfig(),
-                this.serverInfo.getRawMessageStorageStrategy()
-        );
+//`        this.logCollector = GlobalLogCollectorManager.getInstance(
+//                this.serverInfo.getConfigDataSourceConfig(),
+//                this.serverInfo.getRawMessageStorageStrategy()
+//        );`
 
         // 12. 注册当前处理的表名到全局offset管理器
         this.offsetManager.addSourceTableName(this.serverTopicInfo);
@@ -332,9 +338,9 @@ public class DatabaseRichProcessBatchFunction extends ProcessFunction<KafkaPaylo
         this.clientHTTPClient.getTableMetadata(tableDDLRequest);
 
         logger.info("已向探针端发送表结构请求: clientId={}, schema={}, table={}",
-                    tableDDLRequest.getClientId(),
-                    tableDDLRequest.getSchemaName(),
-                    tableDDLRequest.getTableName());
+                tableDDLRequest.getClientId(),
+                tableDDLRequest.getSchemaName(),
+                tableDDLRequest.getTableName());
     }
 
     /**
@@ -493,6 +499,12 @@ public class DatabaseRichProcessBatchFunction extends ProcessFunction<KafkaPaylo
                 offsetManager.updateOffset(metric);
             }
 
+
+            // 日志输出到侧输出流
+            SyncLogEntry logEntry;
+            while ((logEntry = logQueue.poll()) != null) {
+                ctx.output(SYNC_SERVER_LOG_TAG, mapper.writeValueAsString(logEntry));
+            }
 
 
             // 输出结果供下游统计使用
@@ -673,10 +685,9 @@ public class DatabaseRichProcessBatchFunction extends ProcessFunction<KafkaPaylo
             return;
         }
 
-        // ✅ 调用策略对象执行批量插入
+        // 调用策略对象执行批量插入
         Map<Long, String> statusMap = this.insertStrategy.executeBatchInsert(this.tableName, batchItems,this.batchSizeManager,this.columnInfoList,needPadding);
 
-        ArrayList<SyncLogEntry> syncLogEntries = new ArrayList<>();
         // 生成日志记录
         for (BatchInsertItem item : batchItems) {
             KafkaPayload payload = item.getPayload();
@@ -686,13 +697,10 @@ public class DatabaseRichProcessBatchFunction extends ProcessFunction<KafkaPaylo
             boolean isSuccess = "SUCCESS".equals(status);
             String logDetail = getLogDetail(isSuccess, status);
 
-
-//            syncLogEntries.add(buildSyncLogEntry(payload, isSuccess, logDetail));
-
+            // 构建日志对象并加入队列
+            logQueue.offer(buildSyncLogEntry(payload, isSuccess, logDetail));
 
         }
-//        logCollector.add(syncLogEntries);
-
 
     }
 
@@ -763,7 +771,7 @@ public class DatabaseRichProcessBatchFunction extends ProcessFunction<KafkaPaylo
 //            long executionTime = System.currentTimeMillis() - startTime;
 //            // 输出执行耗时
 //            logger.info("⏱️ Stream Load 执行耗时: {}秒", executionTime / 1000.0);
-////            logger.info("⏱️ Stream Load 响应内容: {}", streamLoadResult.getResponseJson());
+    ////            logger.info("⏱️ Stream Load 响应内容: {}", streamLoadResult.getResponseJson());
 //            // 根据执行性能和数据大小综合调整批次大小
 //            batchSizeManager.adjustBatchSizeByPerformance(executionTime, batchItems);
 //
@@ -1044,7 +1052,7 @@ public class DatabaseRichProcessBatchFunction extends ProcessFunction<KafkaPaylo
 
         long methodStartTime = System.currentTimeMillis();
         // 使用共享的日志收集器
-        logCollector.add(syncLogEntry);
+        logQueue.offer(syncLogEntry);
 //        logger.info("⏱️ logCollector.add(syncLogEntry);---------->方法已耗时={}ms",
 //                System.currentTimeMillis() - methodStartTime);
     }
@@ -1081,7 +1089,7 @@ public class DatabaseRichProcessBatchFunction extends ProcessFunction<KafkaPaylo
     @Override
     public void close() throws Exception {
         // 1. 清理本地引用
-        this.logCollector = null;
+//        this.logCollector = null;
 
         // 2. 停止定时任务
         shutdownFlushExecutor();
@@ -1141,6 +1149,8 @@ public class DatabaseRichProcessBatchFunction extends ProcessFunction<KafkaPaylo
         Random random = new Random();
         return 30 + random.nextInt(30); // 45 + [0,15] = [45,60]
     }
+
+
 
 
 }

@@ -35,6 +35,13 @@ public class GlobalLogCollectorManager {
         });
     }
 
+
+    public static LogCollector getInstance(ConfigDataSourceConfig configDataSourceConfig) {
+        return collectors.computeIfAbsent(configDataSourceConfig.getInstanceId(), key -> {
+            LogCollector collector = new LogCollector(configDataSourceConfig);
+            return collector;
+        });
+    }
     /**
      * 关闭所有 LogCollector
      */

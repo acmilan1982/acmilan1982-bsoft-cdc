@@ -14,6 +14,8 @@ import com.bsoft.common.enums.TableRowDeleteStrategy;
 
 import java.sql.PreparedStatement;
 import java.sql.SQLException;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.stream.Collectors;
@@ -26,42 +28,29 @@ public class OracleDeleteStrategy extends AbstractDeleteStrategy {
     public OracleDeleteStrategy() {
     }
 
-    public OracleDeleteStrategy(TargetDataSourceConfig targetDataSourceConfig) {
-        super(targetDataSourceConfig);
+    public OracleDeleteStrategy(TargetDataSourceConfig targetDataSourceConfig,TableRowDeleteStrategy tableRowDeleteStrategy) {
+        super(targetDataSourceConfig,tableRowDeleteStrategy);
     }
-    //
-//    @Override
-//    public String buildDeleteSql(String tableName, Set<String> primaryKeys) {
-//        // 没有主键，无法安全删除
-//        if (primaryKeys.isEmpty()) {
-//            throw new IllegalArgumentException("Primary key set is empty, unsafe to delete from table: " + tableName);
-//        }
-//
-//        // 物理删除
-//        String whereClause = primaryKeys.stream()
-//                .map(pk -> pk + " = ?")
-//                .collect(Collectors.joining(" AND "));
-//        return String.format("DELETE FROM %s WHERE %s", tableName, whereClause);
-//
-////        switch (deleteStrategy) {
-////            case DELETE:
-////                // 物理删除
-////                String whereClause = primaryKeys.stream()
-////                        .map(pk -> pk + " = ?")
-////                        .collect(Collectors.joining(" AND "));
-////                return String.format("DELETE FROM %s WHERE %s", tableName, whereClause);
-////
-////            case DELETE_FLAG:
-////                // 逻辑删除：更新删除标记
-////                String whereClauseUpdate = primaryKeys.stream()
-////                        .map(pk -> pk + " = ?")
-////                        .collect(Collectors.joining(" AND "));
-////                return String.format("UPDATE %s SET cdc_op = 'd' ,cdc_delete_flag = 1 ,cdc_delete_time = SYSDATE WHERE %s", tableName, whereClauseUpdate);
-////
-////            default:
-////                throw new IllegalArgumentException("不支持的删除策略: " + deleteStrategy);
-////        }
-//    }
+
+    @Override
+    public String buildDeleteSql(String tableName, Set<String> primaryKeySet) {
+        // 没有主键，无法安全删除
+        validatePrimaryKeySet(tableName,primaryKeySet);
+        // WHERE：固定顺序（字典序），避免 Set 迭代顺序漂移
+        String whereClause = buildWhereClause(primaryKeySet);
+
+        switch (tableRowDeleteStrategy) {
+            case DELETE:
+                // 物理删除
+                return String.format("delete from %s where %s", tableName, whereClause);
+            case DELETE_FLAG:
+                // 逻辑删除：更新删除标记
+                return String.format("update %s set cdc_op = 'd' ,cdc_delete_flag = 1 ,cdc_delete_time = SYSDATE where %s", tableName, whereClause);
+
+            default:
+                throw new IllegalArgumentException("不支持的删除策略: " + tableRowDeleteStrategy);
+        }
+    }
 //
 //    @Override
 //    public void setParameters(PreparedStatement ps, Map<String, Object> beforeData, Set<String> primaryKeys,
