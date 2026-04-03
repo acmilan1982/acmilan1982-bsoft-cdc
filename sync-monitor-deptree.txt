@@ -1,0 +1,1 @@
+com.bsoft:bsoft-cdc:pom:1.0-SNAPSHOT
