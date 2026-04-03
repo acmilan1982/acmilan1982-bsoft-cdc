@@ -1,5 +1,6 @@
 package com.bsoft.common.bean;
 
+import com.bsoft.common.config.properties.SimpleClientInfo;
 import com.bsoft.common.enums.TableNamingStrategy;
 
 /**
@@ -11,30 +12,30 @@ import com.bsoft.common.enums.TableNamingStrategy;
  * @Create: 2025/12/3 - 23:50
  */
 public class TableDDLRequest {
-    private TargetDataSourceConfig targetDataSourceConfig;
-    private String clientId;
+
+
     private String schemaName;
     private String tableName;
-    private TableNamingStrategy tableNamingStrategy;
+
+    private SimpleClientInfo clientInfo;
+
+    // 目标库 dataSourceId
+    private String targetDataSourceId;
 
     public TableDDLRequest() {
     }
 
-    public TableDDLRequest(TargetDataSourceConfig targetDataSourceConfig,String clientId, String schemaName, String tableName,TableNamingStrategy tableNamingStrategy) {
-        this.targetDataSourceConfig = targetDataSourceConfig;
-        this.clientId = clientId;
+    public TableDDLRequest(String targetDataSourceId,
+                           SimpleClientInfo clientInfo,
+                           String schemaName,
+                           String tableName) {
+        this.targetDataSourceId = targetDataSourceId;
+        this.clientInfo = clientInfo;
         this.schemaName = schemaName;
         this.tableName = tableName;
-        this.tableNamingStrategy = tableNamingStrategy;
     }
 
-    public String getClientId() {
-        return clientId;
-    }
 
-    public void setClientId(String clientId) {
-        this.clientId = clientId;
-    }
 
     public String getSchemaName() {
         return schemaName;
@@ -52,19 +53,36 @@ public class TableDDLRequest {
         this.tableName = tableName;
     }
 
-    public TargetDataSourceConfig getTargetDataSourceConfig() {
-        return targetDataSourceConfig;
+    public String getTargetDataSourceId() {
+        return targetDataSourceId;
     }
 
-    public void setTargetDataSourceConfig(TargetDataSourceConfig targetDataSourceConfig) {
-        this.targetDataSourceConfig = targetDataSourceConfig;
+    public void setTargetDataSourceId(String targetDataSourceId) {
+        this.targetDataSourceId = targetDataSourceId;
+    }
+
+    public SimpleClientInfo getClientInfo() {
+        return clientInfo;
+    }
+
+    public void setClientInfo(SimpleClientInfo clientInfo) {
+        this.clientInfo = clientInfo;
+    }
+
+    // 兼容旧调用方
+    public String getClientId() {
+        return clientInfo == null ? null : clientInfo.getClientId();
     }
 
     public TableNamingStrategy getTableNamingStrategy() {
-        return tableNamingStrategy;
+        return clientInfo == null ? null : clientInfo.getTableNamingStrategy();
     }
 
-    public void setTableNamingStrategy(TableNamingStrategy tableNamingStrategy) {
-        this.tableNamingStrategy = tableNamingStrategy;
+    public String getTableNamePrefix() {
+        return clientInfo == null ? null : clientInfo.getTableNamePrefix();
+    }
+
+    public String getTableNameSuffix() {
+        return clientInfo == null ? null : clientInfo.getTableNameSuffix();
     }
 }

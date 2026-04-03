@@ -1,0 +1,76 @@
+server-info:
+  serverId: Server001
+  version: 1.0
+  tableNamingStrategy: TABLE_MERGE                # TABLE_MERGE：使用源表名，同名表合并到一个目标表
+    # TABLE_PREFIX: 使用源表名，同名冲突时加前缀区分
+  # CLIENTID_SCHEMA_TABLE: 探针ID_用户_表名，全局唯一表名，绝对不会冲突
+
+  tableRowDeleteStrategy: DELETE_FLAG             #  DELETE：源表删除数据，目标表也删除数据
+  #  DELETE_FLAG：源表删除数据，目标表不删除数据，只更新删除标志位
+  ip: 192.168.1.128
+  flinkUiPort: 11005          # flink虚拟集群ui的端口号
+
+server:
+  port: 11002
+  servlet:
+    context-path: /sync-server
+
+config-db:
+  driver-class-name: oracle.jdbc.OracleDriver
+  url: jdbc:oracle:thin:@10.0.0.5:1521/orcl
+  username: CDC
+  password: CDC
+
+
+
+spring:
+  application:
+    name: KafkaToDB
+  main:
+    log-startup-info: true
+    banner-mode: "console"
+  output:
+    ansi:
+      enabled: NEVER  # cmd 下禁用颜色，避免乱码；Windows Terminal 可改 DETECT/ALWAYS
+
+
+# === 日志：控制台 + 文件（按天+大小滚动） ===
+logging:
+  file:
+    name: logs/sync-server.log
+  level:
+    root: INFO
+  logback:
+    rollingpolicy:
+      # 仅按天：logs/server-2025-08-20.log
+      # file-name-pattern: logs/server-%d{yyyy-MM-dd}.log
+      # 按天+大小（推荐）
+      file-name-pattern: logs/server-%d{yyyy-MM-dd}.%i.log
+      max-file-size: 100MB
+      max-history: 30
+      total-size-cap: 10GB
+      clean-history-on-start: true
+  pattern:
+    console: "%d{yyyy-MM-dd HH:mm:ss.SSS} %-5level [%thread] %logger{36} - %msg%n"
+    file:    "%d{yyyy-MM-dd HH:mm:ss.SSS} %-5level [%thread] %logger{36} - %msg%n"
+
+
+# kafka地址配置
+kafka:
+  bootstrap:
+    servers: 10.0.0.5:9092
+
+
+state-backend:
+  checkpoint-path: file:///F:/flink-checkpoints/Server001
+  enable-incremental: false
+
+
+
+zookeeper:
+  connect-string: "10.0.0.5:2182"
+  session-timeout-ms: 30000        # 增加到30秒（3.4.14版本建议）
+  connection-timeout-ms: 10000     # 连接超时10秒
+  base-path: "/bsoft-cdc"
+  retry-count: 5                   # 增加重试次数
+  retry-interval-ms: 2000          # 增加重试间隔

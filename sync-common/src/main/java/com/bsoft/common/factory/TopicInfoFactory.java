@@ -3,8 +3,9 @@ package com.bsoft.common.factory;
 
 
 import com.bsoft.common.bean.*;
+import com.bsoft.common.config.properties.ClientInfo;
+import com.bsoft.common.config.properties.ServerInfo;
 import com.bsoft.common.enums.DatabaseType;
-import com.bsoft.common.enums.TableNamingStrategy;
 import com.bsoft.common.util.DatasourceConfigFetcher;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
@@ -58,6 +59,8 @@ public class TopicInfoFactory {
         serverTopicInfo.setSchemaName(tableExecutionPlan.getSchemaName());
         // 源库表名
         serverTopicInfo.setTableName(tableExecutionPlan.getTableName());
+
+        serverTopicInfo.setClientInfo(tableExecutionPlan.getClientInfo());
 
         // 生成主题
         serverTopicInfo.setTopic(generateTopic(clientId,tableExecutionPlan));
@@ -154,9 +157,11 @@ public class TopicInfoFactory {
         // 设置目标表名
         serverTopicInfo.setTargetTableName(targetTableName);
 
-        serverTopicInfo.setClientId(tableExecutionPlan.getClientId());
+        serverTopicInfo.setClientInfo(tableExecutionPlan.getClientInfo());
 
-        serverTopicInfo.setTableNamingStrategy(tableExecutionPlan.getTableNamingStrategy());
+//        serverTopicInfo.setClientId(tableExecutionPlan.getClientId());
+//        serverTopicInfo.setTableNamingStrategy(tableExecutionPlan.getTableNamingStrategy());
+
 
         return serverTopicInfo;
     }

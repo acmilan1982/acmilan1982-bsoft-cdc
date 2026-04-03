@@ -1,0 +1,96 @@
+monitor-server-info:
+  monitorServerId: monitor-001
+  version: 1.0
+  ip: 192.168.1.174            # sync-server所在机器的IP地址
+  flinkUiPort: 11000           # flink虚拟集群ui的端口号
+
+
+server:
+  port: 11002
+  servlet:
+    context-path: /sync-monitor
+
+
+monitor:
+  lag:
+    fixed-rate-ms: 60000
+
+
+config-db:
+  driver-class-name: oracle.jdbc.OracleDriver
+  url: jdbc:oracle:thin:@10.16.22.30:1521/orcl
+  username: CDC
+  password: CDC
+  maximum-pool-size: 20
+  minimum-idle: 16            # 因为有16条线程并发写入日志，建议配置成16
+  connection-timeout: 30000
+  idle-timeout: 600000
+
+
+
+spring:
+  application:
+    name: sync-monitor-server
+  main:
+    log-startup-info: true
+    banner-mode: "console"
+  output:
+    ansi:
+      enabled: NEVER  # cmd 下禁用颜色，避免乱码；Windows Terminal 可改 DETECT/ALWAYS
+
+
+# === 日志：控制台 + 文件（按天+大小滚动） ===
+logging:
+  file:
+    name: logs/log-server.log
+  level:
+    root: INFO
+    org.apache.kafka: WARN
+    org.apache.kafka.clients: WARN
+    org.apache.kafka.clients.consumer: WARN
+    org.apache.kafka.clients.producer: WARN
+    org.apache.kafka.clients.consumer.ConsumerConfig: WARN
+    # 添加ZK监控相关日志级别
+    com.bsoft.server.zookeeper: INFO
+  logback:
+    rollingpolicy:
+      # 保持文件名一致性
+      file-name-pattern: logs/log-server-%d{yyyy-MM-dd}.%i.log
+      max-file-size: 100MB
+      max-history: 30
+      total-size-cap: 10GB
+      clean-history-on-start: true
+  pattern:
+    console: "%d{yyyy-MM-dd HH:mm:ss.SSS} %-5level [%thread] %logger{36} - %msg%n"
+    file:    "%d{yyyy-MM-dd HH:mm:ss.SSS} %-5level [%thread] %logger{36} - %msg%n"
+
+
+
+# kafka地址配置
+kafka:
+  bootstrap:
+    servers: 192.168.1.11:9092
+
+
+
+
+#flinke检查点的位置
+#windows 下的路径
+state-backend:
+  checkpoint-path: file:///F:/flink-checkpoints/monitor-001
+  enable-incremental: false
+
+#linux 下的路径
+#state-backend:
+#  checkpoint-path: file:////home/user/bsoft-cdc/flink-checkpoints/servers
+#  enable-incremental: false
+
+
+zookeeper:
+  connect-string: "192.168.1.11:2181"
+  session-timeout-ms: 30000        # 增加到30秒（3.4.14版本建议）
+  connection-timeout-ms: 10000     # 连接超时10秒
+  base-path: "/bsoft-cdc"
+  retry-count: 5                   # 增加重试次数
+  retry-interval-ms: 2000          # 增加重试间隔
+

@@ -1,6 +1,7 @@
 package com.bsoft.common.bean;
 
-import com.bsoft.common.enums.TableNamingStrategy;
+import com.bsoft.common.config.properties.ServerInfo;
+import com.bsoft.common.config.properties.SimpleClientInfo;
 
 import java.io.Serializable;
 import java.util.*;
@@ -101,8 +102,8 @@ public class SubscriberMappingRegistry implements Serializable {
                 finalFlatMapSubscriberMappingList.forEach(subscriberMapping -> subscriberMapping.setServerInfo(this.serverInfo));
                 for (SubscriberMapping subscriberMapping : finalFlatMapSubscriberMappingList) {
                     subscriberMapping.setServerInfo(this.serverInfo);
-                    subscriberMapping.setClientId(this.clientInfoRegistry.get(subscriberMapping.getFromDataSourceId()).getClientId());
-                    subscriberMapping.setTableNamingStrategy(this.clientInfoRegistry.get(subscriberMapping.getFromDataSourceId()).getTableNamingStrategy());
+                    subscriberMapping.setClientInfo(this.clientInfoRegistry.get(subscriberMapping.getFromDataSourceId()));
+
                 }
             }
 

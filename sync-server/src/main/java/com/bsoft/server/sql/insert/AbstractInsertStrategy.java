@@ -10,16 +10,17 @@ package com.bsoft.server.sql.insert;
  */
 
 
-import com.bsoft.common.bean.ColumnInfo;
-import com.bsoft.common.bean.KafkaPayload;
-import com.bsoft.common.bean.TargetDataSourceConfig;
+import com.bsoft.common.bean.*;
+import com.bsoft.common.constants.CdcColumnConstants;
 import com.bsoft.common.dataSource.HikariMonitor;
+import com.bsoft.common.enums.DatabaseType;
 import com.bsoft.server.batch.BatchInsertItem;
 import com.bsoft.server.batch.BatchSizeManager;
 import com.bsoft.server.sql.adapter.DataSourceHolder;
 import com.bsoft.server.sql.adapter.DatabaseAdapter;
 import com.bsoft.server.sql.adapter.OracleAdapter;
 
+import com.bsoft.server.sql.doris.DorisCustomColumnMappingSupport;
 import com.bsoft.server.sql.update.AbstractUpdateStrategy;
 import com.zaxxer.hikari.HikariDataSource;
 import org.apache.logging.log4j.LogManager;
@@ -100,25 +101,26 @@ public abstract class AbstractInsertStrategy  implements  InsertStrategy{
 
 
         long connectionStartTime = System.currentTimeMillis();
+//
+//        // ✅ 增加超时前的状态快照
+//        if (this.dataSourceHolder.getDataSource() instanceof HikariDataSource) {
+//            HikariDataSource ds = (HikariDataSource) this.dataSourceHolder.getDataSource();
+//            logger.info("⏱️ 准备获取连接: 池名={}, 活动={}, 空闲={}, 总数={}, 等待线程={}, 方法已耗时={}ms",
+//                    ds.getPoolName(),
+//                    ds.getHikariPoolMXBean().getActiveConnections(),
+//                    ds.getHikariPoolMXBean().getIdleConnections(),
+//                    ds.getHikariPoolMXBean().getTotalConnections(),
+//                    ds.getHikariPoolMXBean().getThreadsAwaitingConnection(),
+//                    System.currentTimeMillis() - methodStartTime);
+//        }
 
-        // ✅ 增加超时前的状态快照
-        if (this.dataSourceHolder.getDataSource() instanceof HikariDataSource) {
-            HikariDataSource ds = (HikariDataSource) this.dataSourceHolder.getDataSource();
-            logger.info("⏱️ 准备获取连接: 池名={}, 活动={}, 空闲={}, 总数={}, 等待线程={}, 方法已耗时={}ms",
-                    ds.getPoolName(),
-                    ds.getHikariPoolMXBean().getActiveConnections(),
-                    ds.getHikariPoolMXBean().getIdleConnections(),
-                    ds.getHikariPoolMXBean().getTotalConnections(),
-                    ds.getHikariPoolMXBean().getThreadsAwaitingConnection(),
-                    System.currentTimeMillis() - methodStartTime);
-        }
         try (Connection conn = this.dataSourceHolder.getDataSource().getConnection()) {
 
-            long connectionAcquireTime = System.currentTimeMillis() - connectionStartTime;
-
-            // ✅ 详细记录连接获取信息
-            logger.info("✅ 成功获取连接: 耗时={}ms, 表={}, 批次={}, 线程={}",
-                    connectionAcquireTime, tableName, batchItems.size(), Thread.currentThread().getName());
+//            long connectionAcquireTime = System.currentTimeMillis() - connectionStartTime;
+//
+//            // ✅ 详细记录连接获取信息
+//            logger.info("✅ 成功获取连接: 耗时={}ms, 表={}, 批次={}, 线程={}",
+//                    connectionAcquireTime, tableName, batchItems.size(), Thread.currentThread().getName());
 
             // ✅ 测试连接有效性
             long pingStartTime = System.currentTimeMillis();
@@ -269,22 +271,37 @@ public abstract class AbstractInsertStrategy  implements  InsertStrategy{
 
     }
 
-    int i;
+
+    // 单条数据的插入
     @Override
-    public void executeSingleInsert(String tableName, KafkaPayload payload) throws Exception {
-        i++;
-        logger.error("executeSingleInsert: {}", i);
+    public void executeSingleInsert(String tableName, KafkaPayload payload,List<ColumnInfo> allColumns) throws Exception {
+
         // 获取数据并添加CDC字段
         Map<String, Object> afterData = payload.getAfterData();
 
         // 增加 op,dml_Time，kafka_enqueue_time
-        afterData.put("cdc_op", payload.getOp());
+        String op = payload.getOp();
+        afterData.put("cdc_op", op.equals("c") ? "i" : op);
         afterData.put("cdc_dml_Time", payload.getDmlTime());
         afterData.put("cdc_kafka_enqueue_time", payload.getKafkaEnqueueTime());
         afterData.put("cdc_insert_time", LocalDateTime.now());
+        afterData.put("cdc_update_time", LocalDateTime.now());
 
-        // 获取字段列表并排序
-        List<String> fieldList = new ArrayList<>(afterData.keySet());
+
+
+        /*
+              预处理：默认空函数
+              doris的处理： 1.处理 Doris custom_column_mapping
+                           2.Doris 且当前表建表属性未声明 cdc_rowid 时，插入前移除该字段
+         */
+        preprocessInsertData(tableName, afterData);
+
+        // 消息中的数据，过滤掉不存在字段，因为表字段与消息字段可能不一致，表可能是不是程序自动创建的
+        Map<String, Object> insertData = prepareSingleInsertData(tableName, afterData, allColumns);
+        List<String> fieldList = new ArrayList<>(insertData.keySet());
+
+
+
 
 
         // 获取日期字段集合
@@ -301,7 +318,7 @@ public abstract class AbstractInsertStrategy  implements  InsertStrategy{
              PreparedStatement ps = conn.prepareStatement(sql)) {
             logger.info("afterData: {}", afterData);
             // 设置参数
-            setParameters(ps, afterData, fieldList, dateFieldSet);
+            setParameters(ps, insertData, fieldList, dateFieldSet);
 
 
             // 执行插入
@@ -324,6 +341,7 @@ public abstract class AbstractInsertStrategy  implements  InsertStrategy{
         dateFieldSet.add("cdc_dml_Time");
         dateFieldSet.add("cdc_kafka_enqueue_time");
         dateFieldSet.add("cdc_insert_time");
+        dateFieldSet.add("cdc_update_time");
     }
 
 
@@ -368,5 +386,199 @@ public abstract class AbstractInsertStrategy  implements  InsertStrategy{
                 System.out.println(Date.from(ldt.atZone(java.time.ZoneId.systemDefault()).toInstant()));
             } catch (Exception ignore) {}
         }
+    }
+
+
+
+
+
+
+
+
+
+
+
+
+    /**
+     * 仅对 Doris 目标库生效：
+     * 1. 先取当前表的表级建表属性
+     * 2. 没有则取库级建表属性
+     * 3. 判断 key_columns / distributed_hash_columns 中是否包含 cdc_rowid
+     */
+    protected boolean shouldKeepCdcRowIdForCurrentTable(String tableName) {
+        TargetDataSourceConfig targetConfig = this.dataSourceHolder.getTargetDataSourceConfig();
+        if (targetConfig == null) {
+            return true;
+        }
+
+        if (targetConfig.getDataSourceType() != DatabaseType.DORIS) {
+            return true;
+        }
+
+        DdlBizAttr ddlBizAttr = targetConfig.getTableLevelDdlBizAttr(tableName);
+        if (ddlBizAttr == null) {
+            ddlBizAttr = targetConfig.getSystemLevelDdlBizAttr();
+        }
+
+        if (!(ddlBizAttr instanceof DorisBizAttr)) {
+            return true;
+        }
+
+        DorisBizAttr dorisBizAttr = (DorisBizAttr) ddlBizAttr;
+        return containsCdcRowId(dorisBizAttr.getKeyColumns())
+                || containsCdcRowId(dorisBizAttr.getDistributedHashColumns());
+    }
+
+    private boolean containsCdcRowId(List<String> columns) {
+        if (columns == null || columns.isEmpty()) {
+            return false;
+        }
+
+        for (String column : columns) {
+            if (column == null) {
+                continue;
+            }
+            String normalized = column.trim();
+            if (normalized.equalsIgnoreCase(CdcColumnConstants.CDC_ROWID_COLUMN_LOWER)
+                    || normalized.equalsIgnoreCase(CdcColumnConstants.CDC_ROWID_COLUMN_UPPER)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+
+
+
+    protected void preprocessInsertData(String tableName, Map<String, Object> data) {
+        // default no-op
+    }
+
+
+
+
+    // 过滤不存在字段
+    protected Map<String, Object> prepareSingleInsertData(String tableName,
+                                                          Map<String, Object> afterData,  // 消息中的参数
+                                                          List<ColumnInfo> allColumns) {  // 实际表字段
+        if (afterData == null || afterData.isEmpty()) {
+            return Collections.emptyMap();
+        }
+
+        if (allColumns == null || allColumns.isEmpty()) {
+            return new LinkedHashMap<>(afterData);
+        }
+
+        // 实际表字段集合
+        Set<String> targetColumns = allColumns.stream()
+                .filter(Objects::nonNull)
+                .map(ColumnInfo::getColumnName)
+                .filter(Objects::nonNull)
+                .map(String::trim)
+                .filter(s -> !s.isEmpty())
+                .map(s -> s.toLowerCase(Locale.ROOT))
+                .collect(Collectors.toCollection(LinkedHashSet::new));
+
+        Map<String, Object> filteredData = new LinkedHashMap<>();
+        for (Map.Entry<String, Object> entry : afterData.entrySet()) {
+            String key = entry.getKey();
+            if (key == null || key.trim().isEmpty()) {
+                continue;
+            }
+
+            // 只保留实际表有包含的字段，没有的字段过滤掉
+            if (targetColumns.contains(key.toLowerCase(Locale.ROOT))) {
+                filteredData.put(key, entry.getValue());
+            }
+        }
+
+        return filteredData;
+    }
+
+
+    /**
+         processedData的归一处理：
+         1. 如果key在表中不存在对应的字段，该entry过滤掉不要
+         2. key与表中字段的实际大小写保持一致
+
+
+     */
+    protected Map<String, Object> normalizeDataByTargetColumns(Map<String, Object> processedData,
+                                                             List<ColumnInfo> allColumns) {
+        if (processedData == null || processedData.isEmpty()) {
+            return Collections.emptyMap();
+        }
+
+        if (allColumns == null || allColumns.isEmpty()) {
+            return processedData;
+        }
+
+        // key: 小写列名, value: 目标表真实列名（保留实际大小写）
+        Map<String, String> targetColumnCaseMap = buildTargetColumnCaseMap(allColumns);
+
+        Map<String, Object> normalizedData = new LinkedHashMap<>();
+
+        // 遍历cdc的参数，即源表字段
+        for (Map.Entry<String, Object> entry : processedData.entrySet()) {
+            // 源表字段名
+            String sourceKey = entry.getKey();
+            // 源表字段值
+            Object value = entry.getValue();
+
+            if (sourceKey == null || sourceKey.trim().isEmpty()) {
+                continue;
+            }
+
+            // 表中的实际字段名
+            String actualColumnName = targetColumnCaseMap.get(sourceKey.toLowerCase(Locale.ROOT));
+            if (actualColumnName == null) {
+                // 目标表不存在该字段，直接丢弃
+                continue;
+            }
+
+            Object existingValue = normalizedData.get(actualColumnName);
+            normalizedData.put(actualColumnName, choosePreferredValue(existingValue, value));
+        }
+
+        return normalizedData;
+    }
+
+
+
+
+    /**
+         表中实际字段，构建成map，
+         key:   小写字段名
+         value: 原始字段名(与表中字段实际的大小写一致)
+     */
+    protected Map<String, String> buildTargetColumnCaseMap(List<ColumnInfo> allColumns) {
+        Map<String, String> targetColumnCaseMap = new LinkedHashMap<>();
+        if (allColumns == null || allColumns.isEmpty()) {
+            return targetColumnCaseMap;
+        }
+
+        for (ColumnInfo columnInfo : allColumns) {
+            if (columnInfo == null || columnInfo.getColumnName() == null) {
+                continue;
+            }
+
+            String actualColumnName = columnInfo.getColumnName().trim();
+            if (actualColumnName.isEmpty()) {
+                continue;
+            }
+
+            targetColumnCaseMap.put(actualColumnName.toLowerCase(Locale.ROOT), actualColumnName);
+        }
+
+        return targetColumnCaseMap;
+    }
+    protected Object choosePreferredValue(Object existingValue, Object newValue) {
+        if (existingValue == null) {
+            return newValue;
+        }
+        if (newValue == null) {
+            return existingValue;
+        }
+        return newValue;
     }
 }

@@ -1,7 +1,7 @@
 
 package com.bsoft.client.signal;
 
-import com.bsoft.common.bean.ClientInfo;
+import com.bsoft.common.config.properties.ClientInfo;
 import org.apache.flink.configuration.Configuration;
 import org.apache.flink.runtime.util.EnvironmentInformation;
 import org.apache.flink.streaming.api.functions.sink.RichSinkFunction;

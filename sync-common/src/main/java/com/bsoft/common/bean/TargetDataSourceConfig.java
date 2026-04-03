@@ -2,12 +2,16 @@
 package com.bsoft.common.bean;
 
 import com.bsoft.common.enums.DatabaseType;
+import com.bsoft.common.enums.DorisTableModel;
+import com.fasterxml.jackson.databind.DeserializationFeature;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.zaxxer.hikari.HikariConfig;
 import com.zaxxer.hikari.HikariDataSource;
 
 import javax.sql.DataSource;
 import java.io.Serializable;
 import java.time.LocalDateTime;
+import java.util.*;
 
 /**
  * @author snoopy
@@ -39,6 +43,21 @@ public class TargetDataSourceConfig implements Serializable {
 
     // 数据库的详细信息，包括类型和版本
     private DatabaseInfo databaseInfo;
+
+
+    private static final ObjectMapper BIZ_ATTR_MAPPER = new ObjectMapper()
+            .configure(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES, false);
+
+
+    // 目标库自定义建表属性，DATA_SOURCE_BIZ_ATTR(JSON)
+    private String dataSourceBizAttr;
+
+    // 库级建表属性
+    private DdlBizAttr systemLevelDdlBizAttr;
+
+    // 表级建表属性，key=最终目标表名 targetTableName
+    private Map<String, DdlBizAttr> tableLevelDdlBizAttrMap = new HashMap<>();
+
 
 
 
@@ -177,7 +196,7 @@ public class TargetDataSourceConfig implements Serializable {
         public Builder sourceApp(String val) { instance.setSourceApp(val); return this; }
         public Builder dataSourceName(String val) { instance.setDataSourceName(val); return this; }
         public Builder serverId(String val) { instance.setServerId(val); return this; }
-
+        public Builder dataSourceBizAttr(String val) { instance.setDataSourceBizAttr(val); return this; }
         public TargetDataSourceConfig build() { return instance; }
     }
 
@@ -232,4 +251,100 @@ public class TargetDataSourceConfig implements Serializable {
     public void setDatabaseInfo(DatabaseInfo databaseInfo) {
         this.databaseInfo = databaseInfo;
     }
+
+
+
+
+    public String getDataSourceBizAttr() {
+        return dataSourceBizAttr;
+    }
+
+    public void setDataSourceBizAttr(String dataSourceBizAttr) {
+        this.dataSourceBizAttr = dataSourceBizAttr;
+        this.systemLevelDdlBizAttr = parseSystemLevelDdlBizAttr(dataSourceBizAttr);
+    }
+
+    // 获取 目标库级 建表参数
+    public DdlBizAttr getSystemLevelDdlBizAttr() {
+        return systemLevelDdlBizAttr;
+    }
+
+    public void setSystemLevelDdlBizAttr(DdlBizAttr systemLevelDdlBizAttr) {
+        this.systemLevelDdlBizAttr = systemLevelDdlBizAttr;
+    }
+
+    private DdlBizAttr parseSystemLevelDdlBizAttr(String json) {
+        if (json == null || json.trim().isEmpty()) {
+            return null;
+        }
+        try {
+            // 当前先按 Doris 解析，返回类型提升为 DdlBizAttr
+            return BIZ_ATTR_MAPPER.readValue(json, DorisBizAttr.class);
+        } catch (Exception e) {
+            throw new IllegalArgumentException("Invalid DATA_SOURCE_BIZ_ATTR: " + json, e);
+        }
+    }
+
+    // 获取 表级 建表参数
+    public Map<String, DdlBizAttr> getTableLevelDdlBizAttrMap() {
+        return tableLevelDdlBizAttrMap;
+    }
+
+    public void setTableLevelDdlBizAttrMap(Map<String, DdlBizAttr> tableLevelDdlBizAttrMap) {
+        this.tableLevelDdlBizAttrMap = (tableLevelDdlBizAttrMap == null)
+                ? new HashMap<>()
+                : tableLevelDdlBizAttrMap;
+    }
+
+    public void putTableLevelDdlBizAttr(String targetTableName, DdlBizAttr bizAttr) {
+        if (targetTableName == null || targetTableName.trim().isEmpty() || bizAttr == null) {
+            return;
+        }
+        this.tableLevelDdlBizAttrMap.put(targetTableName.trim(), bizAttr);
+    }
+
+    public DdlBizAttr getTableLevelDdlBizAttr(String targetTableName) {
+        if (targetTableName == null || targetTableName.trim().isEmpty()) {
+            return null;
+        }
+        return this.tableLevelDdlBizAttrMap.get(targetTableName.trim());
+    }
+
+
+
+    /**
+     * 按表名获取 Doris 表模型。
+     * 非 Doris 数据源，或未配置表模型时返回 null。
+     */
+    public DorisTableModel getTableModel(String targetTableName) {
+        if (this.dataSourceType != DatabaseType.DORIS) {
+            return null;
+        }
+
+        DdlBizAttr ddlBizAttr = getEffectiveDdlBizAttr(targetTableName);
+        if (!(ddlBizAttr instanceof DorisBizAttr)) {
+            return null;
+        }
+
+        return ((DorisBizAttr) ddlBizAttr).getTableModel();
+    }
+
+
+    /**
+     * 按表名获取最终生效的建表属性。
+     * 规则：
+     * 1. 先取表级 DdlBizAttr
+     * 2. 表级没有则回退到系统级 DdlBizAttr
+     * 3. 都没有则返回 null
+     */
+    public DdlBizAttr getEffectiveDdlBizAttr(String targetTableName) {
+        DdlBizAttr ddlBizAttr = getTableLevelDdlBizAttr(targetTableName);
+        if (ddlBizAttr != null) {
+            return ddlBizAttr;
+        }
+        return getSystemLevelDdlBizAttr();
+    }
+
+
 }
+

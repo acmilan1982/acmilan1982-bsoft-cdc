@@ -1,5 +1,7 @@
 package com.bsoft.common.bean;
 
+import com.bsoft.common.config.properties.ServerInfo;
+import com.bsoft.common.config.properties.SimpleClientInfo;
 import com.bsoft.common.enums.TableNamingStrategy;
 
 import java.io.Serializable;
@@ -24,11 +26,9 @@ public class SubscriberMapping implements Serializable {
     private List<Table> sourceTableNameList = new ArrayList<>();
 
 
-    // 客户端id
-    private String clientId;
+    // 客户端相关配置直接聚合
+    private SimpleClientInfo clientInfo;
 
-    // 客户端在目标库的表命名策略
-    private TableNamingStrategy tableNamingStrategy;
 
     //以下属性，只在直接读取 CDC_DATA_SUBSCRIBE 表时使用，稍后会转换成多个 一对一 的SubscriberMapping
     // 业务库 DataSourceId
@@ -52,12 +52,11 @@ public class SubscriberMapping implements Serializable {
         this.sourceTableNameList = sourceTableNameList;
     }
 
-    public SubscriberMapping(String fromDataSourceId,String toDataSourceId, List<Table> sourceTableNameList,String clientId,TableNamingStrategy tableNamingStrategy) {
+    public SubscriberMapping(String fromDataSourceId,String toDataSourceId, List<Table> sourceTableNameList, SimpleClientInfo clientInfo) {
         this.fromDataSourceId = fromDataSourceId;
         this.toDataSourceId = toDataSourceId;
         this.sourceTableNameList = sourceTableNameList;
-        this.clientId = clientId;
-        this.tableNamingStrategy = tableNamingStrategy;
+        this.clientInfo = clientInfo;
     }
 
     public SubscriberMapping(String fromDataSourceId,String toDataSourceId, List<Table> sourceTableNameList, ServerInfo serverInfo) {
@@ -183,20 +182,30 @@ public class SubscriberMapping implements Serializable {
         this.toDataSourceId = toDataSourceId;
     }
 
-    public String getClientId() {
-        return clientId;
-    }
 
-    public void setClientId(String clientId) {
-        this.clientId = clientId;
+
+    public String getClientId() {
+        return this.clientInfo.getClientId();
     }
 
     public TableNamingStrategy getTableNamingStrategy() {
-        return tableNamingStrategy;
+        return this.clientInfo.getTableNamingStrategy();
     }
 
-    public void setTableNamingStrategy(TableNamingStrategy tableNamingStrategy) {
-        this.tableNamingStrategy = tableNamingStrategy;
+    public String getTableNamePrefix() {
+        return this.clientInfo.getTableNamePrefix();
+    }
+
+    public String getTableNameSuffix() {
+        return this.clientInfo.getTableNameSuffix();
+    }
+
+    public SimpleClientInfo getClientInfo() {
+        return clientInfo;
+    }
+
+    public void setClientInfo(SimpleClientInfo clientInfo) {
+        this.clientInfo = clientInfo;
     }
 }
 

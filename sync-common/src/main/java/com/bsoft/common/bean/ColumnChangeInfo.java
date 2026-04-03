@@ -71,6 +71,7 @@ public  class ColumnChangeInfo {
         this.length = length;
     }
 
+
     @Override
     public String toString() {
         return "ColumnChangeInfo{" +

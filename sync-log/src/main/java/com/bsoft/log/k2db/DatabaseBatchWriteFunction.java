@@ -1,5 +1,6 @@
 package com.bsoft.log.k2db;
 import com.bsoft.common.bean.*;
+import com.bsoft.common.config.properties.LogServerInfo;
 import com.bsoft.common.global.GlobalLogCollectorManager;
 import com.bsoft.common.log.LogCollector;
 import org.apache.flink.configuration.Configuration;
@@ -16,7 +17,7 @@ public class DatabaseBatchWriteFunction extends ProcessFunction<SyncLogEntry, Vo
     private static final Logger logger = LogManager.getLogger(DatabaseBatchWriteFunction.class);
 
 
-    private  LogServerInfo logServerInfo;
+    private LogServerInfo logServerInfo;
 
 //    // 移除原有的 LogCollector logCollector 字段
     private transient LogCollector logCollector;

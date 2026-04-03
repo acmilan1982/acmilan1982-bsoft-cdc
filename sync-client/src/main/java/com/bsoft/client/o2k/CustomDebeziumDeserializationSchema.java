@@ -2,10 +2,10 @@
 package com.bsoft.client.o2k;
 
 import com.bsoft.common.bean.BusinessDataSourceConfig;
-import com.bsoft.common.bean.ClientInfo;
+import com.bsoft.common.config.properties.ClientInfo;
+import com.bsoft.common.constants.CdcColumnConstants;
 import com.bsoft.common.enums.JobStartupMode;
-import com.bsoft.common.util.CdcSqlConstants;
-import com.fasterxml.jackson.databind.JsonNode;
+import com.bsoft.common.constants.CdcSqlConstants;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
@@ -163,7 +163,7 @@ public class CustomDebeziumDeserializationSchema implements DebeziumDeserializat
             return null;
         }
         for (Header header : headers) {
-            if(CdcSqlConstants.ROWID_HEADER_KEY.equals(header.key())) {
+            if(CdcColumnConstants.ROWID_HEADER_KEY.equals(header.key())) {
                 return  header.value().toString();
             }
         }
@@ -180,14 +180,14 @@ public class CustomDebeziumDeserializationSchema implements DebeziumDeserializat
         switch (op) {
             case "r": // 新增操作
             case "c": // 快照操作
-                if (afterNode != null) afterNode.put(CdcSqlConstants.CDC_ROWID_FIELD, rowId);
+                if (afterNode != null) afterNode.put(CdcColumnConstants.CDC_ROWID_COLUMN_LOWER, rowId);
                 break;
             case "u": // 更新操作
-                if (afterNode != null) afterNode.put(CdcSqlConstants.CDC_ROWID_FIELD, rowId);
-                if (beforeNode != null) beforeNode.put(CdcSqlConstants.CDC_ROWID_FIELD, rowId);
+                if (afterNode != null) afterNode.put(CdcColumnConstants.CDC_ROWID_COLUMN_LOWER, rowId);
+                if (beforeNode != null) beforeNode.put(CdcColumnConstants.CDC_ROWID_COLUMN_LOWER, rowId);
                 break;
             case "d": // 删除操作
-                if (beforeNode != null) beforeNode.put(CdcSqlConstants.CDC_ROWID_FIELD, rowId);
+                if (beforeNode != null) beforeNode.put(CdcColumnConstants.CDC_ROWID_COLUMN_LOWER, rowId);
                 break;
             default:
                 // 不处理其他操作

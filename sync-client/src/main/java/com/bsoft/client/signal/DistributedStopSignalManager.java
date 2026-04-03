@@ -1,7 +1,7 @@
 
 package com.bsoft.client.signal;
 
-import com.bsoft.common.bean.ClientInfo;
+import com.bsoft.common.config.properties.ClientInfo;
 
 import com.bsoft.common.util.ZooKeeperNodeManager;
 

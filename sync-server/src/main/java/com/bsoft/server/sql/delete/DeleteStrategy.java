@@ -16,6 +16,7 @@ import com.bsoft.common.enums.TableRowDeleteStrategy;
 
 import java.sql.PreparedStatement;
 import java.sql.SQLException;
+import java.util.List;
 import java.util.Map;
 import java.util.Set;
 
@@ -50,4 +51,21 @@ public interface DeleteStrategy {
      */
     void executeDelete(String tableName, KafkaPayload payload) throws Exception;
 
+
+    /**
+     * 执行批量删除操作
+     * - 返回每条数据的执行状态，key 为 offset
+     * - status 的语义参考 AbstractDeleteStrategy 中的约定
+     */
+    Map<Long, String> executeBatchDelete(String tableName, List<KafkaPayload> payloads) throws Exception;
+
+
+
+    /**
+     * 强制物理删除。
+     * 默认回退到 executeDelete，只有 Doris 这类需要区分物理/逻辑删除的策略才覆盖实现。
+     */
+    default void executePhysicalDelete(String tableName, KafkaPayload payload) throws Exception {
+        executeDelete(tableName, payload);
+    }
 }

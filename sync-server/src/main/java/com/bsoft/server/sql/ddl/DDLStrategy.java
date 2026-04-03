@@ -1,9 +1,6 @@
 package com.bsoft.server.sql.ddl;
 
-import com.bsoft.common.bean.ColumnChangeInfo;
-import com.bsoft.common.bean.ColumnInfo;
-import com.bsoft.common.bean.DorisColumnInfo;
-import com.bsoft.common.bean.TableKeys;
+import com.bsoft.common.bean.*;
 
 import java.util.List;
 
@@ -17,7 +14,8 @@ import java.util.List;
  */
 public interface DDLStrategy {
     // 将Oracle的建表语句转换为当前数据库的建表语句
-    String convertOracleCreateTableToCurrentDB(String tableName, String oracleDDL, TableKeys tableKeys);
+    String convertOracleCreateTableToCurrentDB(
+            String tableName, String oracleDDL, TableKeys tableKeys, DDLBuildContext context);
 
     // 向目标表中添加额外的列（如有需要）
     void addExtraColumnsToTable(String tableName);

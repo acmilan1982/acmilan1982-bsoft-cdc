@@ -111,6 +111,7 @@ public abstract class AbstractDDLStrategy implements DDLStrategy{
             }
 
         } catch (Exception e) {
+            e.printStackTrace();
             throw new RuntimeException("向表 " + tableName + " 添加同步字段失败: " + e.getMessage(), e);
         }
     }

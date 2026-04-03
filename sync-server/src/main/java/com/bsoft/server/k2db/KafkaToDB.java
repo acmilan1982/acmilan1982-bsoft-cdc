@@ -5,8 +5,10 @@ import com.bsoft.common.bean.*;
 import com.bsoft.common.core.CDCJob;
 import com.bsoft.common.enums.JobStatus;
 import com.bsoft.common.enums.WindowTimeUnit;
+import com.bsoft.common.factory.TableNameGenerator;
 import com.bsoft.common.global.GlobalLogCollectorManager;
 import com.bsoft.common.global.GlobalZooKeeperManager;
+import com.bsoft.common.pipeline.model.RulePlan;
 import com.bsoft.common.util.DatasourceConfigFetcher;
 import com.bsoft.common.util.JobIdUtil;
 import com.bsoft.common.util.KafkaUtils;
@@ -38,7 +40,6 @@ import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.scheduling.annotation.EnableScheduling;
-import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
 
 import java.io.File;
@@ -50,7 +51,6 @@ import java.util.stream.Collectors;
 
 // 注册为 Spring 管理的组件
 @Component
-@EnableScheduling
 public class KafkaToDB  extends CDCJob {
 
 
@@ -79,14 +79,22 @@ public class KafkaToDB  extends CDCJob {
     // 订阅关系注册器，订阅关系可能有多个
     private SubscriberMappingRegistry subscriberMappingRegistry;
 
-
     @Autowired
     private ServerController serverController;
 
-    private String serverLogTopic = "sync_server_logs";
+    @Autowired
+    private TableNameGenerator tableNameGenerator;
 
-//    @Autowired
-//    private ClientHTTPClient clientHTTPClient;
+    /**
+     * 稳定消费组前缀：flink-k2db-{serverId}-
+     * 约定 serverId 在当前实例生命周期内不变。
+     */
+    private String groupIdPrefix;
+
+    private PipelineSqlSinkTopicResolver pipelineSqlSinkTopicResolver;
+
+    private List<RulePlan> rulePlans = Collections.emptyList();
+
 
 
     public void init() throws Exception {
@@ -121,17 +129,31 @@ public class KafkaToDB  extends CDCJob {
     // 从配置库读取各种配置
     public void prepareForJobExecution() throws Exception {
 
-        // 1.读取目标库的相关连接信息, 设置到serverInfo，注意，现在不能创建datasource，等算子分配到集群后，才能创建serverInfo
+        // 1.向配置库注册当前server
+        configFetcher.registerServerIfAbsent(this.serverInfo);
+
+        // 2.从配置库中加载当前中心端的配置
+        configFetcher.loadServerInfoConfig(this.serverInfo);
+
+        // 3.从配置库读取各个探针的 配置，主要是表的命名方式
+        configFetcher.refreshActiveClientCache();
+
+        // 3.读取目标库的相关连接信息, 设置到serverInfo，注意，现在不能创建datasource，等算子分配到集群后，才能创建serverInfo
         // 一同处理DATA_TO_SOURCE_ID中逗号分隔 DATA_TO_SOURCE_ID，并去重，保证每个目标库只有一个 TargetDataSourceConfig
         // 只读取 有效订阅关系中 的目标数据库，
         targetDataSourceConfigRegistry = configFetcher.generateTargetDataSourceConfigRegistry();
 
 
-        // 2.读取所有订阅关系,最终都解析成 一对一 的关系
+        // 4.读取所有订阅关系,最终都解析成 一对一 的关系
         subscriberMappingRegistry = configFetcher.generateSubscriberMappingRegistry();
 
-        // 3.读取所有 有效的业务库 配置
+        // 5.读取所有 有效的业务库 配置
         businessDataSourceConfigRegistry = configFetcher.generateBusinessDataSourceConfigRegistry();
+
+        // 6.读取所有bbx流程
+        this.rulePlans = configFetcher.loadRulePlans();
+
+
 
 
     }
@@ -147,6 +169,8 @@ public class KafkaToDB  extends CDCJob {
 
         // 3. 初始化serverController，该类用于外部通信，比如建表
         serverController.init(targetDataSourceConfigRegistry);
+        serverController.startWorkers();
+        serverController.buildDorisBizAttrBySqlNodeId(rulePlans);
 
 
 
@@ -168,10 +192,21 @@ public class KafkaToDB  extends CDCJob {
         kafkaUtils.waitUntilTopicExists(topics);
 
 
-        kafkaUtils.createKafkaTopicsIfNotExists(this.serverLogTopic);
+        // 6. 按需创建 日志，监控 主题
+        kafkaUtils.createKafkaTopicsIfNotExists(Arrays.asList(this.serverInfo.getServerLogTopic(), this.serverInfo.getMonitorMetricTopic()));
 
-        // 6. 设置一个启动时间
+        // 7. 初始化 groupId 前缀
+        initGroupIdPrefix();
+
+
+        // 8. 注册flink sql对应的主题
+        this.pipelineSqlSinkTopicResolver = new PipelineSqlSinkTopicResolver(configFetcher,targetDataSourceConfigRegistry,tableNameGenerator);
+        List<ServerTopicInfo> sqlSinkTopics = pipelineSqlSinkTopicResolver.resolve(this.rulePlans);
+        topicInfoRegistry.registerServerTopicInfo(sqlSinkTopics);
+
+        // final. 设置一个启动时间
         serverInfo.notifyClientStart();
+
 
         logger.info("当前 job 启动,启动时间: {}", serverInfo.printStartTime());
     }
@@ -227,9 +262,14 @@ public class KafkaToDB  extends CDCJob {
 
         // 定义侧输出标签，用于输入日志
         OutputTag<String> syncLogEntryOutputTag = new OutputTag<String>("sync-server-log-side-output") {};
-
         // 收集所有日志侧输出流
         List<DataStream<String>> allLogStreams = new ArrayList<>();
+
+        // 定义侧输出标签，用于输入日志
+        OutputTag<String> monitorMetricOutputTag = new OutputTag<String>("sync-server-metric-side-output") {};
+        // 收集所有日志侧输出流
+        List<DataStream<String>> allMonitorMetricOutputTagStreams = new ArrayList<>();
+
         // 读取每个主题的数据
         for (ClientTopicInfo topicInfo : topicInfoRegistry.getServerTopicInfoList()) {
 
@@ -238,7 +278,7 @@ public class KafkaToDB  extends CDCJob {
             String kafkaTopic = serverTopicInfo.getTopic();
 
             // 稳定 groupId：serverId + topic，便于断点续读
-            String groupId = "flink-k2db-" + serverInfo.getServerId() + "-" + kafkaTopic;
+            String groupId = buildGroupId(kafkaTopic);
 
             // TODO 从Kafka读(消费者角色)： 新Source架构
             KafkaSource<String> kafkaSource = KafkaSource.<String>builder()
@@ -268,7 +308,7 @@ public class KafkaToDB  extends CDCJob {
                         return isValid;
                     })
                     .name("filter-" + kafkaTopic).uid("filter-" + kafkaTopic)
-                    .process(new DatabaseRichProcessBatchFunction(serverInfo,serverTopicInfo,syncLogEntryOutputTag)) // 使用ProcessFunction处理写入
+                    .process(new DatabaseRichProcessBatchFunction(serverInfo,serverTopicInfo,syncLogEntryOutputTag,monitorMetricOutputTag)) // 使用ProcessFunction处理写入
                     .name("target-writer-" + kafkaTopic).uid("target-writer-" + kafkaTopic);
 
 
@@ -276,7 +316,8 @@ public class KafkaToDB  extends CDCJob {
             DataStream<String> syncLogEntryDataStream = operationResults.getSideOutput(syncLogEntryOutputTag);
             allLogStreams.add(syncLogEntryDataStream);
 
-
+            DataStream<String> metricEventDataStream = operationResults.getSideOutput(monitorMetricOutputTag);
+            allMonitorMetricOutputTagStreams.add(metricEventDataStream);
 
 //          // 配置统计窗口,长度为一天，步长100分钟
             configureStatisticsWindows(operationResults, WindowTimeUnit.DAY,Time.seconds(100 * 60));
@@ -289,13 +330,16 @@ public class KafkaToDB  extends CDCJob {
         }
 
         //  合并所有日志流后统一 sink(只创建 1 个 KafkaSink)
-        if (!allLogStreams.isEmpty()) {
-            DataStream<String> mergedLogStream = allLogStreams.get(0);
-            for (int i = 1; i < allLogStreams.size(); i++) {
-                mergedLogStream = mergedLogStream.union(allLogStreams.get(i));
-            }
-            sinkSyncLogsToKafka(mergedLogStream); // ✅ 只调用一次
+        DataStream<String> mergedLogStream = mergeStreams(allLogStreams);
+        if (mergedLogStream != null) {
+            sinkStringStreamToKafka(mergedLogStream, this.serverInfo.getServerLogTopic(), "KafkaSink-sync-log");
         }
+
+        DataStream<String> mergedMetricStream = mergeStreams(allMonitorMetricOutputTagStreams);
+        if (mergedMetricStream != null) {
+            sinkStringStreamToKafka(mergedMetricStream, this.serverInfo.getMonitorMetricTopic(), "KafkaSink-monitor-metric");
+        }
+
 
 
         // 添加JVM关闭钩子，确保应用关闭时提交所有offset
@@ -436,48 +480,44 @@ public class KafkaToDB  extends CDCJob {
         return null;
     }
 
-    @Scheduled(fixedRate = 60000) // 每5秒执行一次
-    public void monitorKafkaTopics() throws Exception {
-        GlobalZooKeeperManager offsetManager = GlobalZooKeeperManager.getInstance(serverInfo);
+//    @Scheduled(fixedRate = 60000) // 每5秒执行一次
+//    public void monitorKafkaTopics() throws Exception {
+//        GlobalZooKeeperManager offsetManager = GlobalZooKeeperManager.getInstance(serverInfo);
+//
+//        try {
+//            for (ServerTopicInfo serverTopicInfo : topicInfoRegistry.getServerTopicInfoList()) {
+//
+//                Map<String,String> metric = new HashMap<>();
+//                metric.put("topic",serverTopicInfo.getTopic());
+//                metric.put("targetDataSourceId",serverTopicInfo.getTargetDataSourceId());
+//
+//                metric.put("targetTableName",serverTopicInfo.getTargetTableName());
+//                metric.put("unconsumedMessageCount",kafkaUtils.getUnconsumedMessageCount(serverTopicInfo.getTopic(),buildGroupId(serverTopicInfo.getTopic())).toString());
+//
+//                offsetManager.updateUnconsumedMessageCount(metric);
+//            }
+//        } catch (Exception e) {
+//            e.printStackTrace();
+//            throw new RuntimeException(e);
+//        }
+//    }
 
-        try {
-            for (ServerTopicInfo serverTopicInfo : topicInfoRegistry.getServerTopicInfoList()) {
-
-                Map<String,String> metric = new HashMap<>();
-                metric.put("topic",serverTopicInfo.getTopic());
-                metric.put("targetDataSourceId",serverTopicInfo.getTargetDataSourceId());
-
-                metric.put("targetTableName",serverTopicInfo.getTargetTableName());
-                metric.put("unconsumedMessageCount",kafkaUtils.getUnconsumedMessageCount(serverTopicInfo.getTopic()).toString());
-
-                offsetManager.updateUnconsumedMessageCount(metric);
-            }
-        } catch (Exception e) {
-            e.printStackTrace();
-            throw new RuntimeException(e);
-        }
-    }
-
-    public void sinkSyncLogsToKafka(DataStream<String> syncLogEntryDataStream) {
-        // 为每个侧输出流创建 Kafka Sink
-        syncLogEntryDataStream
+    public void sinkStringStreamToKafka(DataStream<String> stream, String topic, String sinkName) {
+        stream
                 .sinkTo(KafkaSink.<String>builder()
                         .setBootstrapServers(kafkaUtils.getKafkaBootstrapServers())
                         .setRecordSerializer(KafkaRecordSerializationSchema.builder()
-                                .setTopic(this.serverLogTopic)
+                                .setTopic(topic)
                                 .setValueSerializationSchema(new SimpleStringSchema())
                                 .build())
                         .setDeliverGuarantee(DeliveryGuarantee.AT_LEAST_ONCE)
-                        //  连接管理配置(防止频繁创建/销毁连接)
-                        .setProperty("connections.max.idle.ms", "540000") // 9分钟空闲超时
+                        .setProperty("connections.max.idle.ms", "540000")
                         .setProperty("max.block.ms", "60000")
-                        .setProperty("metadata.max.age.ms", "300000") // 5分钟刷新元数据
-                        // 性能优化配置
-                        .setProperty("batch.size", "262144") // 增加批大小到64KB
-                        .setProperty("linger.ms", "100") // 增加等待时间
-                        .setProperty("buffer.memory", "67108864") // 64MB缓冲区内存
-                        .setProperty("compression.type", "lz4") // 启用LZ4压缩
-                        // 无限重试配置
+                        .setProperty("metadata.max.age.ms", "300000")
+                        .setProperty("batch.size", "262144")
+                        .setProperty("linger.ms", "100")
+                        .setProperty("buffer.memory", "67108864")
+                        .setProperty("compression.type", "lz4")
                         .setProperty("retries", String.valueOf(Integer.MAX_VALUE))
                         .setProperty("retry.backoff.ms", "1000")
                         .setProperty("reconnect.backoff.ms", "1000")
@@ -486,9 +526,45 @@ public class KafkaToDB  extends CDCJob {
                         .setProperty("delivery.timeout.ms", String.valueOf(Integer.MAX_VALUE))
                         .setProperty("acks", "1")
                         .build())
-//                    .uid(clientId + "-sink-" + topic)
-                .name("KafkaSink-" + this.serverLogTopic);
-
+                .name(sinkName);
     }
 
+
+    // ========= 初始化（在 serverInfo 已加载后调用一次） =========
+
+    /**
+     * 初始化 Kafka 消费组前缀。
+     * 建议在 prepareForJobExecution() 中、loadServerInfoConfig(...) 之后调用。
+     */
+    private void initGroupIdPrefix() {
+        if (serverInfo == null || serverInfo.getServerId() == null) {
+            throw new IllegalStateException("serverInfo or serverId is null, cannot init groupIdPrefix");
+        }
+        this.groupIdPrefix = "flink-k2db-" + serverInfo.getServerId() + "-";
+    }
+
+    /**
+     * 按 topic 生成稳定 groupId。
+     */
+    private String buildGroupId(String kafkaTopic) {
+        if (groupIdPrefix == null) {
+            throw new IllegalStateException("groupIdPrefix is not initialized");
+        }
+        if (kafkaTopic == null || kafkaTopic.trim().isEmpty()) {
+            throw new IllegalArgumentException("kafkaTopic is blank");
+        }
+        return groupIdPrefix + kafkaTopic;
+    }
+
+
+    private DataStream<String> mergeStreams(List<DataStream<String>> streams) {
+        if (streams == null || streams.isEmpty()) {
+            return null;
+        }
+        DataStream<String> merged = streams.get(0);
+        for (int i = 1; i < streams.size(); i++) {
+            merged = merged.union(streams.get(i));
+        }
+        return merged;
+    }
 }

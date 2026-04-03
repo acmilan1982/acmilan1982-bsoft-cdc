@@ -9,10 +9,10 @@ import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 
 import javax.sql.DataSource;
-import java.sql.Connection;
-import java.sql.DriverManager;
-import java.sql.PreparedStatement;
-import java.sql.ResultSet;
+import java.sql.*;
+import java.util.Collections;
+import java.util.List;
+import java.util.stream.Collectors;
 
 /**
  * ClassName: OracleTableMetadataReader
@@ -179,6 +179,324 @@ public class OracleTableMetadataReader {
                     + tableMappingConfig.getSchemaName() + "." + tableMappingConfig.getTableName(), e);
         }
     }
+
+
+
+    // 获取指定表的列信息
+    public OracleColumnsQueryResult queryColumnsByOwnerAndTables(OracleColumnsQueryRequest oracleColumnsQueryRequest) {
+        String owner = oracleColumnsQueryRequest.getOwner();
+        List<String> tableNames = oracleColumnsQueryRequest.getTableNames();
+        if (owner == null || owner.trim().isEmpty()) {
+            throw new IllegalArgumentException("owner 不能为空");
+        }
+
+        OracleColumnsQueryResult result = new OracleColumnsQueryResult();
+        result.setOwner(owner.trim().toUpperCase());
+
+        if (tableNames == null || tableNames.isEmpty()) {
+            return result;
+        }
+
+        List<String> normalizedTables = tableNames.stream()
+                .filter(t -> t != null && !t.trim().isEmpty())
+                .map(t -> t.trim().toUpperCase())
+                .distinct()
+                .collect(java.util.stream.Collectors.toList());
+
+        if (normalizedTables.isEmpty()) {
+            return result;
+        }
+
+        final int batchSize = 1000;
+        try (java.sql.Connection conn = dataSource.getConnection()) {
+            for (int from = 0; from < normalizedTables.size(); from += batchSize) {
+                int to = Math.min(from + batchSize, normalizedTables.size());
+                List<String> batch = normalizedTables.subList(from, to);
+
+                String inClause = String.join(",", java.util.Collections.nCopies(batch.size(), "?"));
+                String sql =
+                        "SELECT OWNER, TABLE_NAME, COLUMN_NAME, DATA_TYPE, COLUMN_ID, " +
+                                "       DATA_LENGTH, DATA_PRECISION, DATA_SCALE, NULLABLE, CHAR_LENGTH " +
+                                "FROM ALL_TAB_COLUMNS " +
+                                "WHERE OWNER = ? AND TABLE_NAME IN (" + inClause + ") " +
+                                "ORDER BY TABLE_NAME, COLUMN_ID";
+
+                try (java.sql.PreparedStatement ps = conn.prepareStatement(sql)) {
+                    int idx = 1;
+                    ps.setString(idx++, result.getOwner());
+                    for (String tableName : batch) {
+                        ps.setString(idx++, tableName);
+                    }
+
+                    try (java.sql.ResultSet rs = ps.executeQuery()) {
+                        while (rs.next()) {
+                            OracleColumnMetadata meta = new OracleColumnMetadata();
+                            meta.setOwner(rs.getString("OWNER"));
+                            meta.setTableName(rs.getString("TABLE_NAME"));
+                            meta.setColumnName(rs.getString("COLUMN_NAME"));
+                            meta.setDataType(rs.getString("DATA_TYPE"));
+
+                            meta.setColumnId(toInteger(rs.getObject("COLUMN_ID")));
+                            meta.setDataLength(toInteger(rs.getObject("DATA_LENGTH")));
+                            meta.setDataPrecision(toInteger(rs.getObject("DATA_PRECISION")));
+                            meta.setDataScale(toInteger(rs.getObject("DATA_SCALE")));
+                            meta.setCharLength(toInteger(rs.getObject("CHAR_LENGTH")));
+                            meta.setNullable(rs.getString("NULLABLE"));
+
+                            result.add(meta);
+                        }
+                    }
+                }
+            }
+        } catch (Exception e) {
+            throw new RuntimeException("查询 ALL_TAB_COLUMNS 失败, owner=" + owner + ", tables=" + tableNames, e);
+        }
+
+        return result;
+    }
+//
+//    /**
+//     * Execute user SQL in metadata-only mode and return result column metadata.
+//     * The SQL must be a single SELECT/CTE statement.
+//     */
+//    public OracleColumnsQueryResult queryColumnsBySql(OracleSqlColumnsQueryRequest request) {
+//        if (request == null) {
+//            throw new IllegalArgumentException("request cannot be null");
+//        }
+//
+//        // 待执行的sql
+//        String sql = request.getSql();
+//        validateQuerySql(sql);
+//
+//        // sql中的表，所属的schema
+//        String targetSchema = normalizeSchema(request.getSchema()); // 可为空
+//        OracleColumnsQueryResult result = new OracleColumnsQueryResult();
+//
+////        String owner = businessDataSourceConfig != null ? businessDataSourceConfig.getDataSourceUserName() : null;
+////        if (owner != null && !owner.trim().isEmpty()) {
+////            result.setOwner(owner.trim().toUpperCase());
+////        }
+//
+//        try (Connection conn = dataSource.getConnection()) {
+//            // 保存原始 schema
+//            String originalSchema = getCurrentSchema(conn);
+//
+//            try {
+//                if (targetSchema != null) {
+//                    // Connection设置成当前请求的 schema
+//                    setCurrentSchema(conn, targetSchema);
+//                    result.setOwner(targetSchema); // 返回结果owner按目标schema展示
+//                }
+//
+//                try (PreparedStatement ps = conn.prepareStatement(sql.trim())) {
+//                    ResultSetMetaData metaData = ps.getMetaData();
+//                    if (metaData == null) {
+//                        ps.setMaxRows(1);
+//                        try (ResultSet rs = ps.executeQuery()) {
+//                            metaData = rs.getMetaData();
+//                        }
+//                    }
+//
+//                    if (metaData != null) {
+//                        int columnCount = metaData.getColumnCount();
+//                        for (int i = 1; i <= columnCount; i++) {
+//                            OracleColumnMetadata meta = new OracleColumnMetadata();
+//                            meta.setOwner(result.getOwner());
+//                            meta.setTableName("SQL_RESULT");
+//                            meta.setColumnName(metaData.getColumnLabel(i));
+//                            meta.setDataType(metaData.getColumnTypeName(i));
+//                            meta.setColumnId(i);
+//                            meta.setDataLength(toNullableInteger(metaData.getColumnDisplaySize(i)));
+//                            meta.setDataPrecision(toNullableInteger(metaData.getPrecision(i)));
+//                            meta.setDataScale(toNullableInteger(metaData.getScale(i)));
+//                            meta.setNullable(toNullableFlag(metaData.isNullable(i)));
+//                            result.add(meta);
+//                        }
+//                    }
+//                }
+//            } finally {
+//                if (originalSchema != null && !originalSchema.trim().isEmpty()) {
+//                    // 还原原始 schema
+//                    setCurrentSchema(conn, originalSchema);
+//                }
+//            }
+//
+//        } catch (Exception e) {
+//            e.printStackTrace();
+//            throw new RuntimeException("Execute SQL metadata query failed," + e.getMessage(), e);
+//        }
+//
+//        return result;
+//    }
+
+
+    public OracleColumnsQueryResult queryColumnsBySql(OracleSqlColumnsQueryRequest request) {
+        if (request == null) throw new IllegalArgumentException("request cannot be null");
+
+        String sql = request.getSql();
+        validateQuerySql(sql);
+
+        String targetSchema = normalizeSchema(request.getSchema());
+        OracleColumnsQueryResult result = new OracleColumnsQueryResult();
+
+        try (Connection conn = dataSource.getConnection()) {
+            String originalSchema = getCurrentSchema(conn);
+            boolean switched = false;
+
+            try {
+                if (targetSchema != null && !targetSchema.equalsIgnoreCase(originalSchema)) {
+                    setCurrentSchema(conn, targetSchema); // 这里可能 ORA-01031
+                    switched = true;
+                    result.setOwner(targetSchema);
+                } else {
+                    result.setOwner(originalSchema);
+                }
+
+                try  {
+                    PreparedStatement ps = conn.prepareStatement(sql.trim());
+                    ResultSetMetaData metaData = ps.getMetaData();
+                    if (metaData == null) {
+                        ps.setMaxRows(1);
+                        try (ResultSet rs = ps.executeQuery()) {
+                            metaData = rs.getMetaData();
+                        }
+                    }
+                    if (metaData != null) {
+                        int columnCount = metaData.getColumnCount();
+                        for (int i = 1; i <= columnCount; i++) {
+                            OracleColumnMetadata meta = new OracleColumnMetadata();
+                            meta.setOwner(result.getOwner());
+                            meta.setTableName("SQL_RESULT");
+                            meta.setColumnName(metaData.getColumnLabel(i));
+                            meta.setDataType(metaData.getColumnTypeName(i));
+                            meta.setColumnId(i);
+                            meta.setDataLength(toNullableInteger(metaData.getColumnDisplaySize(i)));
+                            meta.setDataPrecision(toNullableInteger(metaData.getPrecision(i)));
+                            meta.setDataScale(toNullableInteger(metaData.getScale(i)));
+                            meta.setNullable(toNullableFlag(metaData.isNullable(i)));
+                            result.add(meta);
+                        }
+                    }
+
+
+                } catch (SQLException e) {
+                    throw new RuntimeException(e);
+                }
+
+            } catch (SQLException e) {
+                e.printStackTrace();
+                // 保留 Oracle 错误码，主调可直接看到具体原因
+                throw new RuntimeException(
+                        "Execute SQL metadata query failed, oracleCode=" + e.getErrorCode() + ", message=" + e.getMessage(), e);
+            } finally {
+                // 恢复失败只记日志，不能再抛异常覆盖主异常
+                if (switched) {
+                    try {
+                        setCurrentSchema(conn, originalSchema);
+                    } catch (Exception restoreEx) {
+                        logger.warn("restore schema failed, originalSchema={}, err={}",
+                                originalSchema, restoreEx.getMessage(), restoreEx);
+                    }
+                }
+            }
+
+        } catch (Exception e) {
+            e.printStackTrace();
+            throw new RuntimeException("Execute SQL metadata query failed, " + e.getMessage(), e);
+        }
+
+        return result;
+    }
+
+    private void validateQuerySql(String sql) {
+        if (sql == null || sql.trim().isEmpty()) {
+            throw new IllegalArgumentException("sql cannot be empty");
+        }
+        String trimmed = sql.trim();
+        if (trimmed.contains(";")) {
+            throw new IllegalArgumentException("sql must be a single statement and cannot contain ';'");
+        }
+        String upper = trimmed.toUpperCase();
+        if (!(upper.startsWith("SELECT ") || upper.startsWith("WITH "))) {
+            throw new IllegalArgumentException("only SELECT/CTE sql is supported");
+        }
+    }
+
+    private Integer toNullableInteger(int value) {
+        return value <= 0 ? null : value;
+    }
+
+    private String toNullableFlag(int nullableCode) {
+        if (nullableCode == ResultSetMetaData.columnNoNulls) {
+            return "N";
+        }
+        if (nullableCode == ResultSetMetaData.columnNullable) {
+            return "Y";
+        }
+        return null;
+    }
+
+    private Integer toInteger(Object v) {
+        if (v == null) {
+            return null;
+        }
+        if (v instanceof Integer) {
+            return (Integer) v;
+        }
+        if (v instanceof java.math.BigDecimal) {
+            return ((java.math.BigDecimal) v).intValue();
+        }
+        if (v instanceof Number) {
+            return ((Number) v).intValue();
+        }
+        return Integer.valueOf(String.valueOf(v));
+    }
+
+
+
+    private String normalizeSchema(String schema) {
+        if (schema == null || schema.trim().isEmpty()) {
+            return null;
+        }
+        String s = schema.trim().toUpperCase();
+        if (!s.matches("[A-Z][A-Z0-9_\\$#]*")) {
+            throw new IllegalArgumentException("invalid schema name");
+        }
+        return s;
+    }
+
+    private String getCurrentSchema(Connection conn) throws Exception {
+        // Oracle下最稳妥
+        try (PreparedStatement ps = conn.prepareStatement(
+                "SELECT SYS_CONTEXT('USERENV','CURRENT_SCHEMA') FROM dual");
+             ResultSet rs = ps.executeQuery()) {
+            return rs.next() ? rs.getString(1) : null;
+        }
+    }
+
+    private void setCurrentSchema(Connection conn, String schema) throws Exception {
+        try (PreparedStatement ps = conn.prepareStatement(
+                "ALTER SESSION SET CURRENT_SCHEMA = " + schema)) {
+            ps.execute();
+        } catch (SQLException e) {
+            if (e.getErrorCode() == 1031) {
+                throw new SQLException("ORA-01031: insufficient privileges for ALTER SESSION/CURRENT_SCHEMA, schema=" + schema, e);
+            }
+            throw e;
+        }
+    }
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 

@@ -1,9 +1,12 @@
 package com.bsoft.common.core;
 
 import com.bsoft.common.bean.*;
+import com.bsoft.common.config.properties.ClientInfo;
+import com.bsoft.common.config.properties.LogServerInfo;
+import com.bsoft.common.config.properties.PipeLineInfo;
+import com.bsoft.common.config.properties.ServerInfo;
 import com.bsoft.common.enums.JobStatus;
 import com.bsoft.common.global.GlobalZooKeeperManager;
-import com.bsoft.common.util.ZooKeeperNodeManager;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -30,6 +33,11 @@ public class CDCJob {
     // 客户端信息
     @Autowired
     protected LogServerInfo logServerInfo;
+
+
+    //
+    @Autowired
+    protected PipeLineInfo pipeLineInfo;
 
     // 主题信息注册中心
     protected TopicInfoRegistry topicInfoRegistry = new TopicInfoRegistry();

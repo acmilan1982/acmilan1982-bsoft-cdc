@@ -61,7 +61,7 @@ public interface InsertStrategy {
                                          List<ColumnInfo> allColumns,
                                          boolean needPadding) throws Exception;
     // 单条插入-增量阶段
-    void executeSingleInsert(String tableName, KafkaPayload payload) throws Exception;
+    void executeSingleInsert(String tableName, KafkaPayload payload,List<ColumnInfo> allColumns) throws Exception;
 
 
 

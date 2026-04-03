@@ -2,11 +2,15 @@ package com.bsoft.common.global;
 
 
 
-import com.bsoft.common.bean.BaseInfo;
-import com.bsoft.common.bean.ClientInfo;
-import com.bsoft.common.bean.ServerInfo;
+import com.bsoft.common.config.properties.BaseInfo;
+import com.bsoft.common.config.properties.ClientInfo;
+import com.bsoft.common.config.properties.PipeLineInfo;
+import com.bsoft.common.config.properties.ServerInfo;
 import com.bsoft.common.bean.ServerTopicInfo;
+import com.bsoft.common.constants.MetricKeys;
 import com.bsoft.common.enums.JobStatus;
+import com.bsoft.common.enums.MetricType;
+import com.bsoft.common.metric.MonitorMetricEvent;
 import com.bsoft.common.util.JsonUtil;
 import com.bsoft.common.util.ZooKeeperNodeManager;
 import org.apache.logging.log4j.LogManager;
@@ -40,10 +44,29 @@ public class GlobalZooKeeperManager {
     private  ServerInfo serverInfo;
 
 
+
+
+    private volatile ConcurrentHashMap<MetricKey, Long> serverOffsetCurrentMetrics;
+    private volatile ConcurrentHashMap<MetricKey, Long> serverOffsetCommitMetrics;
+    private final Object serverOffsetSwapLock = new Object();
+
+    private volatile ConcurrentHashMap<MetricKey, Long> serverLagCurrentMetrics;
+    private volatile ConcurrentHashMap<MetricKey, Long> serverLagCommitMetrics;
+    private final Object serverLagSwapLock = new Object();
+
+
+
+
     // 使用双缓冲机制-客户端
     private volatile ConcurrentHashMap<String, Long> clientCurrentMetrics;
     private volatile ConcurrentHashMap<String, Long> clientCommitMetrics;
     private final Object clientSwapLock = new Object();
+
+
+
+
+
+
     private  ClientInfo clientInfo;
 
     private GlobalZooKeeperManager(ServerInfo serverInfo) throws Exception {
@@ -54,13 +77,15 @@ public class GlobalZooKeeperManager {
                 new Thread(r, "zk-offset-commit-thread"));
 
         // 初始化双缓冲区
-        this.serverCurrentMetrics = new ConcurrentHashMap<>();
-        this.serverCommitMetrics = new ConcurrentHashMap<>();
+        this.serverOffsetCurrentMetrics = new ConcurrentHashMap<>();
+        this.serverOffsetCommitMetrics = new ConcurrentHashMap<>();
+        this.serverLagCurrentMetrics = new ConcurrentHashMap<>();
+        this.serverLagCommitMetrics = new ConcurrentHashMap<>();
 
-        // 可配置的提交间隔（默认10秒）
-        int commitIntervalSeconds = 10; // 或从配置文件读取
-        scheduler.scheduleAtFixedRate(this::serverBatchCommitMetrics,
-                commitIntervalSeconds, commitIntervalSeconds, TimeUnit.SECONDS);
+//        // 可配置的提交间隔（默认10秒）
+//        int commitIntervalSeconds = 10; // 或从配置文件读取
+//        scheduler.scheduleAtFixedRate(this::serverBatchCommitMetrics,
+//                commitIntervalSeconds, commitIntervalSeconds, TimeUnit.SECONDS);
 
         logger.info("GlobalZooKeeperOffsetManager已经初始化: {}", serverInfo.getServerId());
 
@@ -140,6 +165,8 @@ public class GlobalZooKeeperManager {
                         instance = new GlobalZooKeeperManager((ServerInfo) baseInfo);
                     } else if (baseInfo instanceof ClientInfo) {
                         instance = new GlobalZooKeeperManager((ClientInfo) baseInfo);
+                    } else if (baseInfo instanceof ClientInfo) {
+                        instance = new GlobalZooKeeperManager((PipeLineInfo) baseInfo);
                     } else {
                         throw new IllegalArgumentException("不支持的BaseInfo类型: " + baseInfo.getClass());
                     }
@@ -176,31 +203,140 @@ public class GlobalZooKeeperManager {
         return this.zkManager.getNodeData(serverIPPath);
     }
 
-    /**
-     * 更新offset（线程安全，非阻塞）
-     */
-    public void updateMetric(String topic,String targetDataSourceId,String targetTableName, String metricType, long value) {
-        String key = targetDataSourceId + "_" + targetTableName + "_" + metricType;
-        MetricKey metricKey = new MetricKey(topic,targetDataSourceId, targetTableName, metricType);
-        serverCurrentMetrics.compute(metricKey, (k, currentValue) ->
-                currentValue == null ? value : Math.max(currentValue, value));
+//    /**
+//     * 更新offset（线程安全，非阻塞）
+//     */
+//    public void updateMetric(String topic,String targetDataSourceId,String targetTableName, String metricType, long value) {
+//        MetricKey metricKey = new MetricKey(topic, targetDataSourceId, targetTableName, metricType);
+//
+//        // offset: 取最大，防止回退
+//        if (isOffsetMetric(metricType)) {
+//            serverCurrentMetrics.compute(metricKey, (k, currentValue) ->
+//                    currentValue == null ? value : Math.max(currentValue, value));
+//            return;
+//        }
+//
+//        // unconsumedMessageCount(lag): 用最新值覆盖，允许下降
+//        if (isLagMetric(metricType)) {
+//            serverCurrentMetrics.put(metricKey, value);
+//            return;
+//        }
+//
+//        // 兜底：未知类型按最新值覆盖
+//        serverCurrentMetrics.put(metricKey, value);
+//    }
+
+    private boolean isOffsetMetric(String metricType) {
+        return MetricType.OFFSET.code().equals(metricType);
     }
 
-    public void updateOffset(Map<String,String> metric) {
-        String topic = metric.get("topic");
-        String targetDataSourceId = metric.get("targetDataSourceId");
-        String targetTableName = metric.get("targetTableName");
-        Long offset = Long.parseLong( metric.get("offset"));
-        updateMetric(topic,targetDataSourceId,targetTableName,"offset",offset);
+    private boolean isLagMetric(String metricType) {
+        return MetricType.UNCONSUMED_MESSAGE_COUNT.code().equals(metricType);
     }
 
-    public void updateUnconsumedMessageCount(Map<String,String> metric) {
-        String topic = metric.get("topic");
-        String targetDataSourceId = metric.get("targetDataSourceId");
-        String targetTableName = metric.get("targetTableName");
-        Long unconsumedMessageCount = Long.parseLong( metric.get("unconsumedMessageCount"));
-        updateMetric(topic,targetDataSourceId,targetTableName,"sumedMessageCount",unconsumedMessageCount);
+    // 更新 offset：只写 offset map
+    public void updateOffset(MonitorMetricEvent monitorMetricEvent) {
+        String serverId = monitorMetricEvent.getServerId();
+        String topic  =monitorMetricEvent.getTopic();
+        String targetDataSourceId =  monitorMetricEvent.getTargetDataSourceId();
+        String targetTableName =  monitorMetricEvent.getTargetTableName();
+        long offset = monitorMetricEvent.getValue();
+
+        MetricKey key = new MetricKey(serverId,topic, targetDataSourceId, targetTableName, MetricType.OFFSET.code());
+        serverOffsetCurrentMetrics.compute(key, (k, currentValue) ->
+                currentValue == null ? offset : Math.max(currentValue, offset));
     }
+
+    // 更新 lag：只写 lag map
+    public void updateUnconsumedMessageCount(Map<String, String> metric) {
+        String topic = metric.get(MetricKeys.TOPIC);
+        String targetDataSourceId = metric.get(MetricKeys.TARGET_DATA_SOURCE_ID);
+        String targetTableName = metric.get(MetricKeys.TARGET_TABLE_NAME);
+        long lag = Long.parseLong(metric.get(MetricKeys.UNCONSUMED_MESSAGE_COUNT));
+
+//        MetricKey key = new MetricKey(topic, targetDataSourceId, targetTableName, MetricType.UNCONSUMED_MESSAGE_COUNT.code());
+//        serverLagCurrentMetrics.put(key, lag);
+    }
+
+
+
+
+    public void flushLagMetrics() {
+        batchCommitLagMetrics();
+        if (!serverLagCurrentMetrics.isEmpty()) {
+            batchCommitLagMetrics();
+        }
+    }
+
+
+
+    // 对外：分开的 flush 方法
+    public void flushOffsetMetrics() {
+        batchCommitOffsetMetrics();
+        if (!serverOffsetCurrentMetrics.isEmpty()) {
+            batchCommitOffsetMetrics();
+        }
+    }
+
+
+    // 私有：offset 提交
+    private void batchCommitOffsetMetrics() {
+        synchronized (serverOffsetSwapLock) {
+            if (serverOffsetCurrentMetrics.isEmpty()) return;
+            ConcurrentHashMap<MetricKey, Long> temp = serverOffsetCommitMetrics;
+            serverOffsetCommitMetrics = serverOffsetCurrentMetrics;
+            serverOffsetCurrentMetrics = temp;
+            serverOffsetCurrentMetrics.clear();
+        }
+
+        serverOffsetCommitMetrics.forEach((metricKey, value) -> {
+            try {
+                String path = String.format(serverInfo.getMonitorDataPath() + "/%s/%s/%s",
+                        metricKey.getServerId(),
+                        metricKey.getTargetDataSourceId(),
+                        metricKey.getTargetTableName(),
+                        MetricType.OFFSET.code());
+                zkManager.readModifyWrite(path, originalData -> JsonUtil.offsetToJson(originalData, metricKey.getTopic(), value));
+            } catch (Exception e) {
+                synchronized (serverOffsetSwapLock) {
+                    serverOffsetCurrentMetrics.compute(metricKey, (k, currentValue) ->
+                            currentValue == null ? value : Math.max(currentValue, value));
+                }
+            }
+        });
+        serverOffsetCommitMetrics.clear();
+    }
+
+
+    // 私有：lag 提交
+    private void batchCommitLagMetrics() {
+        synchronized (serverLagSwapLock) {
+            if (serverLagCurrentMetrics.isEmpty()) return;
+            ConcurrentHashMap<MetricKey, Long> temp = serverLagCommitMetrics;
+            serverLagCommitMetrics = serverLagCurrentMetrics;
+            serverLagCurrentMetrics = temp;
+            serverLagCurrentMetrics.clear();
+        }
+
+        serverLagCommitMetrics.forEach((metricKey, value) -> {
+            try {
+                String path = String.format(serverInfo.getMonitorDataPath() + "/%s/%s/%s",
+                        metricKey.getTargetDataSourceId(),
+                        metricKey.getTargetTableName(),
+                        "unconsumed_message_count");
+                zkManager.readModifyWrite(path, originalData -> JsonUtil.unconsumedCountToJson(originalData, metricKey.getTopic(), value));
+            } catch (Exception e) {
+                synchronized (serverLagSwapLock) {
+                    serverLagCurrentMetrics.put(metricKey, value);
+                }
+            }
+        });
+        serverLagCommitMetrics.clear();
+    }
+
+
+
+
 
     // 客户端更新scn
     public void updateScn(String metric, Long scn) {
@@ -235,13 +371,13 @@ public class GlobalZooKeeperManager {
                 String targetDataSourceId = metricKey.getTargetDataSourceId();
                 String targetTableName = metricKey.getTargetTableName();
                 String metricType = metricKey.getMetricType();
-                if("offset".equals(metricType)){
+                if (MetricType.OFFSET.code().equals(metricType)){
                     String path = String.format(serverInfo.getMonitorDataPath() + "/%s/%s/%s", targetDataSourceId,targetTableName, metricType);
                     zkManager.readModifyWrite(path, originalData -> {
                         return JsonUtil.offsetToJson(originalData,topic,value); // 返回修改后的数据
                     });
                 }
-                if("unconsumedMessageCount".equals(metricType)){
+                if (MetricType.UNCONSUMED_MESSAGE_COUNT.code().equals(metricType)){
                     String path = String.format(serverInfo.getMonitorDataPath() + "/%s/%s/%s", targetDataSourceId,targetTableName, "unconsumed_message_count");
                     zkManager.readModifyWrite(path, originalData -> {
                         return JsonUtil.unconsumedCountToJson(originalData,topic,value); // 返回修改后的数据
@@ -338,8 +474,6 @@ public class GlobalZooKeeperManager {
     public void shutdown() {
         logger.info("Shutting down Global ZooKeeper Offset Manager");
 
-        // 先提交所有pending的offset
-        flushOffsets();
 
         // 关闭定时任务
         if (scheduler != null && !scheduler.isShutdown()) {
@@ -410,16 +544,26 @@ public class GlobalZooKeeperManager {
     class MetricKey{
 
 
+        private String serverId;
         private String topic;
         private String targetDataSourceId;
         private String targetTableName;
         private String metricType;
 
-        public MetricKey(String topic,String targetDataSourceId, String targetTableName, String metricType) {
+        public MetricKey(String serverId,String topic,String targetDataSourceId, String targetTableName, String metricType) {
+            this.serverId = serverId;
             this.topic = topic;
             this.targetDataSourceId = targetDataSourceId;
             this.targetTableName = targetTableName;
             this.metricType = metricType;
+        }
+
+        public String getServerId() {
+            return serverId;
+        }
+
+        public void setServerId(String serverId) {
+            this.serverId = serverId;
         }
 
         public String getTopic() {
@@ -454,17 +598,16 @@ public class GlobalZooKeeperManager {
             this.metricType = metricType;
         }
 
-
         @Override
         public boolean equals(Object o) {
             if (o == null || getClass() != o.getClass()) return false;
             MetricKey metricKey = (MetricKey) o;
-            return Objects.equals(topic, metricKey.topic) && Objects.equals(targetDataSourceId, metricKey.targetDataSourceId) && Objects.equals(targetTableName, metricKey.targetTableName) && Objects.equals(metricType, metricKey.metricType);
+            return Objects.equals(serverId, metricKey.serverId) && Objects.equals(topic, metricKey.topic) && Objects.equals(targetDataSourceId, metricKey.targetDataSourceId) && Objects.equals(targetTableName, metricKey.targetTableName) && Objects.equals(metricType, metricKey.metricType);
         }
 
         @Override
         public int hashCode() {
-            return Objects.hash(topic, targetDataSourceId, targetTableName, metricType);
+            return Objects.hash(serverId, topic, targetDataSourceId, targetTableName, metricType);
         }
     }
 }

@@ -8,6 +8,8 @@ package com.bsoft.server.sql.adapter.meta;
  * @Author: snoopy
  * @Create: 2025/12/31 - 15:13
  */
+import com.bsoft.common.bean.DDLBuildContext;
+import com.bsoft.common.bean.DorisBizAttr;
 import com.bsoft.common.bean.TableKeys;
 import com.bsoft.common.bean.TargetDataSourceConfig;
 import com.bsoft.server.sql.ddl.DDLStrategy;
@@ -26,10 +28,13 @@ public class DefaultMetadataWriter implements MetadataWriter {
         this.ddlStrategy.executeCreateTable(createTableSql);
     }
 
+
     @Override
-    public String convertOracleCreateTableToCurrentDB(String tableName, String oracleDDL, TableKeys tableKeys) {
-        return this.ddlStrategy.convertOracleCreateTableToCurrentDB(tableName, oracleDDL, tableKeys);
+    public String convertOracleCreateTableToCurrentDB(
+            String tableName, String oracleDDL, TableKeys tableKeys, DDLBuildContext context) {
+        return this.ddlStrategy.convertOracleCreateTableToCurrentDB(tableName, oracleDDL, tableKeys, context);
     }
+
 
     @Override
     public void addExtraColumnsToTable(String tableName) {

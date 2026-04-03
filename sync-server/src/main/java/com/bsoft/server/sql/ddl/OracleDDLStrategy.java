@@ -6,10 +6,7 @@ import com.alibaba.druid.sql.ast.statement.SQLCreateTableStatement;
 import com.alibaba.druid.sql.ast.statement.SQLTableElement;
 import com.alibaba.druid.sql.dialect.oracle.ast.stmt.OraclePrimaryKey;
 import com.alibaba.druid.sql.dialect.oracle.parser.OracleStatementParser;
-import com.bsoft.common.bean.ColumnChangeInfo;
-import com.bsoft.common.bean.KeyDef;
-import com.bsoft.common.bean.TableKeys;
-import com.bsoft.common.bean.TargetDataSourceConfig;
+import com.bsoft.common.bean.*;
 import com.bsoft.common.util.OracleKeyInspector;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -57,7 +54,8 @@ public class OracleDDLStrategy extends AbstractDDLStrategy {
 
     //  将Oracle的建表语句转换为当前数据库的建表语句，当前步骤不处理主键等约束和索引
     @Override
-    public  String convertOracleCreateTableToCurrentDB(String newTableName,String oracleCreateTableSql, TableKeys tableKeys) {
+    public  String convertOracleCreateTableToCurrentDB(String newTableName,String oracleCreateTableSql,
+                                                       TableKeys tableKeys, DDLBuildContext context) {
         // 解析原建表语句
         OracleStatementParser parser = new OracleStatementParser(oracleCreateTableSql);
         SQLStatement stmt = parser.parseStatement();

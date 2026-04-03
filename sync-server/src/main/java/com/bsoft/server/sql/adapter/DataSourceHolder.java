@@ -1,6 +1,6 @@
 package com.bsoft.server.sql.adapter;
 
-import com.bsoft.common.bean.ServerInfo;
+import com.bsoft.common.config.properties.ServerInfo;
 import com.bsoft.common.bean.TargetDataSourceConfig;
 import com.bsoft.common.dataSource.DataSourceFactory;
 

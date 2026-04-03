@@ -14,6 +14,8 @@
         <module>sync-client</module>
         <module>sync-server</module>
         <module>sync-log</module>
+        <module>sync-monitor</module>
+        <module>sync-pipeline</module>
     </modules>
 
     <properties>

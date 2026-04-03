@@ -4,19 +4,19 @@ client-info:
   version: 1.0
   description: 总部测试        # 客户端描述信息，可以是任何字符串
   ip: 192.168.0.94          # 客户端IP地址，要求可以被 配置端 访问
-  flinkUiPort: 12005         # Flink web UI端口
+  flinkUiPort: 20005         # Flink web UI端口
   oracle-cdc-pre-requisites: false  # 是否检查当前业务库满足CDC的先决条件，建议开启
 
 
 
 server:
-  port: 12002               # spring boot服务端口
+  port: 20006               # spring boot服务端口
   servlet:
     context-path: /sync-client  # 设置服务的上下文路径，一般不需要修改
 
 config-db:                                       # 配置库的url
   driver-class-name: oracle.jdbc.OracleDriver
-  url: jdbc:oracle:thin:@10.16.22.30:1521/orcl
+  url: jdbc:oracle:thin:@192.168.1.15:1521/orcl
   username: CDC
   password: CDC
   maximum-pool-size: 10
@@ -66,6 +66,7 @@ logging:
 kafka:
   bootstrap:
     servers: 192.168.1.11:9092
+
 
 #flinke检查点的位置
 #windows 下的路径

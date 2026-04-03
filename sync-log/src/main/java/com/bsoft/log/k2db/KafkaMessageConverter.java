@@ -1,16 +1,10 @@
 package com.bsoft.log.k2db;
 
-import com.bsoft.common.bean.KafkaPayload;
 import com.bsoft.common.bean.SyncLogEntry;
-import com.bsoft.common.util.CdcSqlConstants;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
-
-import java.time.LocalDateTime;
-import java.time.format.DateTimeFormatter;
-import java.util.*;
 
 public class KafkaMessageConverter {
     private static final Logger logger = LogManager.getLogger(KafkaMessageConverter.class);

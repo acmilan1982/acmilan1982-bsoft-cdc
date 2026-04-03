@@ -1,5 +1,6 @@
 package com.bsoft.common.bean;
 
+import com.bsoft.common.config.properties.SimpleClientInfo;
 import com.bsoft.common.enums.TableNamingStrategy;
 
 import java.io.Serializable;
@@ -28,15 +29,9 @@ public class ClientTopicInfo implements Serializable {
     // 主题名
     private String topic;
 
-    // 客户端id
-    private String clientId;
-
-    // 客户端在目标库的表命名策略
-    private TableNamingStrategy tableNamingStrategy;
-
+    private SimpleClientInfo clientInfo;
     public ClientTopicInfo() {
     }
-
 
     public String getBusinessDataSourceId() {
         return businessDataSourceId;
@@ -82,19 +77,28 @@ public class ClientTopicInfo implements Serializable {
         return schemaName + "." + tableName;
     }
 
-    public String getClientId() {
-        return clientId;
+    public SimpleClientInfo getClientInfo() {
+        return clientInfo;
     }
 
-    public void setClientId(String clientId) {
-        this.clientId = clientId;
+    public void setClientInfo(SimpleClientInfo clientInfo) {
+        this.clientInfo = clientInfo;
+    }
+
+    // 兼容旧调用方
+    public String getClientId() {
+        return clientInfo == null ? null : clientInfo.getClientId();
     }
 
     public TableNamingStrategy getTableNamingStrategy() {
-        return tableNamingStrategy;
+        return clientInfo == null ? null : clientInfo.getTableNamingStrategy();
     }
 
-    public void setTableNamingStrategy(TableNamingStrategy tableNamingStrategy) {
-        this.tableNamingStrategy = tableNamingStrategy;
+    public String getTableNamePrefix() {
+        return clientInfo == null ? null : clientInfo.getTableNamePrefix();
+    }
+
+    public String getTableNameSuffix() {
+        return clientInfo == null ? null : clientInfo.getTableNameSuffix();
     }
 }

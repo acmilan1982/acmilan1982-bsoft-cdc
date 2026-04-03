@@ -10,9 +10,15 @@ package com.bsoft.common.util;
  */
 
 import com.bsoft.common.bean.*;
-import com.bsoft.common.dto.BusinessDataSourceConfigDTO;
-import com.bsoft.common.dto.TableMappingConfigDTO;
+import com.bsoft.common.config.properties.ClientInfo;
+import com.bsoft.common.config.properties.ServerInfo;
+import com.bsoft.common.config.properties.SimpleClientInfo;
+import com.bsoft.common.constants.CdcSqlConstants;
 import com.bsoft.common.enums.*;
+import com.bsoft.common.pipeline.PlanNodeType;
+import com.bsoft.common.pipeline.model.PlanNodeSpec;
+import com.bsoft.common.pipeline.model.RulePlan;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -24,7 +30,10 @@ import java.net.InetAddress;
 import java.net.NetworkInterface;
 import java.sql.*;
 import java.util.*;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.stream.Collectors;
+
+import com.fasterxml.jackson.core.type.TypeReference;
 
 @Component
 public class DatasourceConfigFetcher {
@@ -55,6 +64,15 @@ public class DatasourceConfigFetcher {
 
     //业务库的配置对象
     private BusinessDataSourceConfig businessDataSourceConfig;
+
+
+
+
+
+
+    private ActiveClientCache activeClientCache = ActiveClientCache.empty();
+
+    private static final ObjectMapper OBJECT_MAPPER = new ObjectMapper();
 
     @PostConstruct
     public void initConnection() throws Exception {
@@ -87,12 +105,16 @@ public class DatasourceConfigFetcher {
         String ipDesc = String.join(", ", getLocalIPAddresses());
         String desc = clientInfo.getDescription() + " IP: " + ipDesc;
 
+        // 1. 检查配置库中，客户端是否存在，如果存在，使用库中的信息填充ClientInfo
         try (Connection conn = dataSource.getConnection();
              PreparedStatement checkStmt = conn.prepareStatement(CdcSqlConstants.FETCH_CLIENT_SQL)) {
 
             checkStmt.setString(1, clientInfo.getClientId());
             try (ResultSet rs = checkStmt.executeQuery()) {
-                if (rs.next() && rs.getInt(1) > 0) {
+                if (rs.next()) {
+                    clientInfo.setTableNamingStrategy(TableNamingStrategy.valueOf(rs.getString("TABLE_NAMING_STRATEGY")));
+                    clientInfo.setTableNamePrefix(rs.getString("TABLE_NAME_PREFIX"));
+                    clientInfo.setTableNameSuffix(rs.getString("TABLE_NAME_SUFFIX"));
                     // 已存在，直接返回
                     return;
                 }
@@ -105,6 +127,7 @@ public class DatasourceConfigFetcher {
             insertStmt.setString(1, clientInfo.getClientId());
             insertStmt.setString(2, desc);
             insertStmt.setString(3, "1");
+            insertStmt.setString(4, "TABLE_MERGE");
             insertStmt.executeUpdate();
         }
     }
@@ -112,27 +135,27 @@ public class DatasourceConfigFetcher {
 
 
 //    // 向 配置库 注册中心库
-//    public void registerServerIfAbsent(ServerInfo serverInfo) throws Exception {
-//        this.serverInfo = serverInfo;
-//        String serverId =  serverInfo.getServerId();
-//
-//        try (Connection conn = dataSource.getConnection();
-//             PreparedStatement checkStmt = conn.prepareStatement(CdcSqlConstants.FETCH_SERVER_SQL)) {
-//            checkStmt.setString(1, serverId);
-//            try (ResultSet rs = checkStmt.executeQuery()) {
-//                if (rs.next() && rs.getInt(1) == 0) {
-//                    String ipDesc = String.join(", ", getLocalIPAddresses());
-//                    try (PreparedStatement insertStmt = conn.prepareStatement(CdcSqlConstants.REGISTER_SERVER_SQL)) {
-//                        insertStmt.setString(1, serverId);
-//                        insertStmt.setString(2, "服务端注册自: " + serverId + " IP: " + ipDesc);
-//                        insertStmt.setString(3, "1");
-//                        insertStmt.executeUpdate();
-//                    }
-//                }
-//            }
-//        }
-//
-//    }
+    public void registerServerIfAbsent(ServerInfo serverInfo) throws Exception {
+        this.serverInfo = serverInfo;
+        String serverId =  serverInfo.getServerId();
+
+        try (Connection conn = dataSource.getConnection();
+             PreparedStatement checkStmt = conn.prepareStatement(CdcSqlConstants.FETCH_SERVER_SQL)) {
+            checkStmt.setString(1, serverId);
+            try (ResultSet rs = checkStmt.executeQuery()) {
+                if (rs.next() && rs.getInt(1) == 0) {
+                    String ipDesc = String.join(", ", getLocalIPAddresses());
+                    try (PreparedStatement insertStmt = conn.prepareStatement(CdcSqlConstants.REGISTER_SERVER_SQL)) {
+                        insertStmt.setString(1, serverId);
+                        insertStmt.setString(2, "服务端注册自: " + serverId + " IP: " + ipDesc);
+                        insertStmt.setString(3, "1");
+                        insertStmt.executeUpdate();
+                    }
+                }
+            }
+        }
+
+    }
 //
 //    // 读取业务库的配置，当前客户端可能尚未配置对应的业务库
 //    // 循环调用，直到配置完整
@@ -315,6 +338,49 @@ public class DatasourceConfigFetcher {
     //-------------------------------------------中心端方法-----------------------------------
     //-------------------------------------------中心端方法-----------------------------------
 
+    //  读取 业务库数据源 中的基本配置，比如url,用户名,密码
+    public void loadServerInfoConfig(ServerInfo serverInfo) throws Exception {
+        try (Connection conn = dataSource.getConnection();
+             PreparedStatement ps = conn.prepareStatement(CdcSqlConstants.FETCH_SERVER_CONFIG_SQL)) {
+//            ps.setString(1, serverInfo.getServerId());
+            try (ResultSet rs = ps.executeQuery()) {
+                while (rs.next()) {
+                    String key = rs.getString("CONFIG_KEY");
+                    String value = rs.getString("CONFIG_VALUE");
+                    if (key == null || value == null) {
+                        continue;
+                    }
+
+                    switch (key) {
+                        case "tableRowDeleteStrategy":
+                            serverInfo.setTableRowDeleteStrategy(TableRowDeleteStrategy.fromCode(value));
+                            break;
+                        case "raw-message-storage-strategy":
+                            serverInfo.setRawMessageStorageStrategy(RawMessageStorageStrategy.valueOf(value));
+                            break;
+                        case "snapshotBatchSize":
+                            serverInfo.setSnapshotBatchSize(Integer.parseInt(value));
+                            break;
+                        case "auto-create-table":
+                            serverInfo.setAutoCreateTable(Boolean.parseBoolean(value));
+                            break;
+                        case "auto-expand-column-length":
+                            serverInfo.setAutoExpandColumnLength(Boolean.parseBoolean(value));
+                            break;
+                        case "server-log-topic-name":
+                            serverInfo.setServerLogTopic(value);
+                            break;
+                        case "monitor-metric-topic-name":
+                            serverInfo.setMonitorMetricTopic(value);
+                            break;
+                        default:
+                            break;
+                    }
+                }
+            }
+        }
+    }
+
     // 读取 目标库数据源 配置,目前一个中心端，向所有目标库写入
     public TargetDataSourceConfigRegistry generateTargetDataSourceConfigRegistry() throws Exception {
         // 读取 当前服务端 对应的 目标库数据源 配置
@@ -399,6 +465,7 @@ public class DatasourceConfigFetcher {
                 .dataSourceType(DatabaseType.fromCode(rs.getString("DATA_SOURCE_TYPE").toUpperCase()))
                 .dataSourceServiceName(rs.getString("DATA_SOURCE_SERVICE_NAME"))
                 .fgActive(rs.getString("FG_ACTIVE"))
+                .dataSourceBizAttr(rs.getString("DATA_SOURCE_BIZ_ATTR"))
                 .build();
     }
 
@@ -607,30 +674,74 @@ public class DatasourceConfigFetcher {
 
 
 
-    // 读取所有有效的 订阅关系-仅服务端使用
+
+
+
+    // 读取所有有效的 探针端
     public List<SimpleClientInfo> getSimpleClientInfoList() throws Exception {
-        // 所有的订阅关系，都集中到 SubscriberMappingRegistry
-        List<SimpleClientInfo> simpleClientInfoList = new ArrayList<>();
+        return loadActiveSimpleClientInfos();
+    }
 
 
-        // 从 CDC_CLIENT 中读取fg_active = '1'
+    // 读取 CDC_CLIENT表 FG_ACTIVE = '1'
+    private List<SimpleClientInfo> loadActiveSimpleClientInfos() throws Exception {
+        List<SimpleClientInfo> result = new ArrayList<>();
+
         try (Connection conn = dataSource.getConnection();
-             PreparedStatement ps = conn.prepareStatement(CdcSqlConstants.FETCH_SIMPLE_CLIENT_SQL)) {
+             PreparedStatement ps = conn.prepareStatement(CdcSqlConstants.FETCH_SIMPLE_CLIENT_SQL);
+             ResultSet rs = ps.executeQuery()) {
 
-
-            try (ResultSet rs = ps.executeQuery()) {
-                while (rs.next()) {
-                    SimpleClientInfo simpleClientInfo = new SimpleClientInfo();
-                    simpleClientInfo.setClientId(rs.getString("CLIENT_ID"));
-                    simpleClientInfo.setDataSourceId(rs.getString("DATA_SOURCE_ID"));
-                    simpleClientInfo.setTableNamingStrategy(TableNamingStrategy.fromCode(rs.getString("TABLENAMINGSTRATEGY")));
-                    simpleClientInfoList.add(simpleClientInfo);
+            while (rs.next()) {
+                SimpleClientInfo info = buildSimpleClientInfo(rs);
+                if (info != null) {
+                    result.add(info);
                 }
             }
         }
 
-        return simpleClientInfoList;
+        return result;
     }
+
+    private SimpleClientInfo buildSimpleClientInfo(ResultSet rs) throws SQLException {
+        // 只规范化索引键，避免缓存 key 因脏数据失配
+        String clientId = trim(rs.getString("CLIENT_ID"));
+        String dataSourceId = trim(rs.getString("DATA_SOURCE_ID"));
+
+        if (clientId.isEmpty() || dataSourceId.isEmpty()) {
+            return null;
+        }
+
+        String strategyRaw = rs.getString("TABLE_NAMING_STRATEGY");
+        String tableNamePrefix = rs.getString("TABLE_NAME_PREFIX");
+        String tableNameSuffix = rs.getString("TABLE_NAME_SUFFIX");
+
+        SimpleClientInfo info = new SimpleClientInfo();
+        info.setClientId(clientId);
+        info.setDataSourceId(dataSourceId);
+        info.setTableNamePrefix(tableNamePrefix);
+        info.setTableNameSuffix(tableNameSuffix);
+
+        if (strategyRaw != null && !strategyRaw.isEmpty()) {
+            try {
+                info.setTableNamingStrategy(TableNamingStrategy.fromCode(strategyRaw.trim()));
+            } catch (Exception e) {
+                logger.warn("Invalid TABLE_NAMING_STRATEGY, clientId={}, value={}", clientId, strategyRaw);
+            }
+        }
+
+        return info;
+    }
+
+    /**
+     * 刷新 CDC_CLIENT 激活客户端缓存（FG_ACTIVE='1'）。
+     */
+    public void refreshActiveClientCache() throws Exception {
+        List<SimpleClientInfo> activeClients = loadActiveSimpleClientInfos();
+        this.activeClientCache = ActiveClientCache.from(activeClients);
+        logger.info("Active client cache ready, total={}", this.activeClientCache.size());
+    }
+
+
 
 
     // 中心端读取所有业务库配置，目前只有一个中心端
@@ -1031,8 +1142,7 @@ public class DatasourceConfigFetcher {
                                                     table.getSchemaName(),
                                                     table.getTableName(),
                                                     tableStatus,
-                                                    subscriberMapping.getClientId(),
-                                                    subscriberMapping.getTableNamingStrategy());
+                                                    subscriberMapping.getClientInfo());
 
     }
 
@@ -1045,14 +1155,21 @@ public class DatasourceConfigFetcher {
             ps.setString(1, businessDataSourceConfig.getDataSourceId());
             try (ResultSet rs = ps.executeQuery()) {
                 while (rs.next()) {
-                    this.lastExecutionPlan.addPlanItem(rs.getString("FROM_DATA_SOURCE_ID"),
-                                                       rs.getString("TO_DATA_SOURCE_ID"),
-                                                       rs.getString("SCHEMA_NAME"),
-                                                       rs.getString("TABLE_NAME"),
-                                                       rs.getString("TABLE_STATUS"),
-                                                       rs.getString("CLIENT_ID"),
-                                                       TableNamingStrategy.fromCode(rs.getString("TABLENAMINGSTRATEGY"))
-                                                       );
+                    SimpleClientInfo clientInfo = new SimpleClientInfo();
+                    clientInfo.setClientId(rs.getString("CLIENT_ID"));
+                    clientInfo.setTableNamingStrategy(TableNamingStrategy.fromCode(rs.getString("TABLE_NAMING_STRATEGY")));
+                    clientInfo.setTableNamePrefix(rs.getString("TABLE_NAME_PREFIX"));
+                    // 如果后面 SQL/表里加了 TABLE_NAME_SUFFIX，这里再补上
+                    // clientInfo.setTableNameSuffix(rs.getString("TABLE_NAME_SUFFIX"));
+
+                    this.lastExecutionPlan.addPlanItem(
+                            rs.getString("FROM_DATA_SOURCE_ID"),
+                            rs.getString("TO_DATA_SOURCE_ID"),
+                            rs.getString("SCHEMA_NAME"),
+                            rs.getString("TABLE_NAME"),
+                            rs.getString("TABLE_STATUS"),
+                            clientInfo
+                    );
                 }
             }
         }
@@ -1224,6 +1341,125 @@ public class DatasourceConfigFetcher {
         }
         return null;
     }
+
+
+
+    // 新增方法
+    public List<RulePlan> loadRulePlans() throws Exception {
+        // key: planId
+        // value: 当前plan的所有节点，每个节点对应一个PlanNodeSpec
+        Map<String, List<PlanNodeSpec>> planNodesByPlanId = new LinkedHashMap<>();
+        // 用于存储 plan 的输出主题
+        Map<String, String> outputTopicByPlanId = new HashMap<>();
+        // 由于同一个plan中的node是按序获取的，通过该map
+        Map<String, String> prevOutputByPlanId = new HashMap<>();
+
+        try (Connection conn = dataSource.getConnection();
+             // 查询 CDC_PIPELINE 表
+             PreparedStatement ps = conn.prepareStatement(CdcSqlConstants.FETCH_CDC_PIPELINE_SQL);
+             ResultSet rs = ps.executeQuery()) {
+
+            // 处理 CDC_PIPELINE表 中的每行记录
+            while (rs.next()) {
+                // plan id
+                String planId = trim(rs.getString("PLAN_ID"));
+                if (planId.isEmpty()) {
+                    continue;
+                }
+
+                // 执行序号
+                int sn = rs.getInt("SN");
+                String typeRaw = trim(rs.getString("PLAN_NODE_TYPE")).toUpperCase(Locale.ROOT);
+                // 节点类型
+                PlanNodeType type = PlanNodeType.valueOf(typeRaw);
+
+                // 当前节点的所有相关配置
+                Map<String, Object> params = parseJsonMap(rs.getString("PLAN_NODE_VALUE"));
+                params.put("planNodeDesc", rs.getString("PLAN_NODE_DESC"));
+                params.put("sn", sn);
+
+                // 当前节点id
+                String nodeId = "p" + planId + "_n" + sn;
+                // 当前节点输出值的id，后继节点可以通过该id，来获取前驱节点的输出值
+                String output = "p" + planId + "_out_" + sn;
+
+                List<String> inputs = new ArrayList<>();
+                String prevOutput = prevOutputByPlanId.get(planId);
+                if (prevOutput != null) {
+                    inputs.add(prevOutput);
+                }
+
+                // 创建节点对象
+                PlanNodeSpec spec = new PlanNodeSpec();
+                spec.setId(nodeId);
+                spec.setType(type);
+                spec.setInputs(inputs);
+                spec.setOutput(output);   // 当前节点的输出值id
+                spec.setParams(params);
+
+                planNodesByPlanId.computeIfAbsent(planId, k -> new ArrayList<>()).add(spec);
+                prevOutputByPlanId.put(planId, output);
+
+                if (type == PlanNodeType.SINK_TABLE && params.get("topic") != null) {
+                    outputTopicByPlanId.put(planId, String.valueOf(params.get("topic")));
+                }
+            } // CDC_PIPELINE表 单行记录处理完成
+        }
+
+        List<RulePlan> result = new ArrayList<>();
+        for (Map.Entry<String, List<PlanNodeSpec>> e : planNodesByPlanId.entrySet()) {
+            RulePlan plan = new RulePlan();
+            plan.setPlanId(e.getKey());
+            plan.setOutputTopic(outputTopicByPlanId.getOrDefault(e.getKey(), ""));
+            plan.setNodes(e.getValue());
+            result.add(plan);
+        }
+        return result;
+    }
+
+    private static Map<String, Object> parseJsonMap(String json) throws Exception {
+        if (json == null || json.trim().isEmpty()) {
+            return new HashMap<>();
+        }
+        return OBJECT_MAPPER.readValue(json, new TypeReference<Map<String, Object>>() {});
+    }
+
+    private static String trim(String s) {
+        return s == null ? "" : s.trim();
+    }
+
+
+
+
+    public String resolveClientIdByDataSourceId(String dataSourceId) {
+        String key = trim(dataSourceId);
+        if (key.isEmpty()) {
+            throw new IllegalArgumentException("dataSourceId 不能为空");
+        }
+
+        SimpleClientInfo info = activeClientCache.requireByDataSourceId(key);
+        return info.getClientId();
+    }
+
+
+    public SimpleClientInfo requireActiveClientInfoByDataSourceId(String dataSourceId) {
+        String key = trim(dataSourceId);
+        if (key.isEmpty()) {
+            throw new IllegalArgumentException("dataSourceId 不能为空");
+        }
+
+        return activeClientCache.requireByDataSourceId(key);
+    }
+
+
+    public Map<String, SimpleClientInfo> getActiveClientByDataSourceId() {
+        return activeClientCache.byDataSourceIdView();
+    }
+
+    public Map<String, SimpleClientInfo> getActiveClientByClientId() {
+        return activeClientCache.byClientIdView();
+    }
+
 
 
 }

@@ -66,7 +66,7 @@ public class LogPersistenceJob extends CDCJob {
     private StateBackendProperties stateBackendProperties;
 
 
-    private final String serverLogTopic = "sync_server_logs";
+    private final String serverLogTopic = "cdc.sync.server.logs.v1";
 
 //    @Autowired
 //    private ClientHTTPClient clientHTTPClient;

@@ -10,7 +10,7 @@ package com.bsoft.server.sink;
  */
 
 
-import com.bsoft.common.bean.ServerInfo;
+import com.bsoft.common.config.properties.ServerInfo;
 import com.bsoft.common.enums.WindowTimeUnit;
 import com.bsoft.server.k2db.TableOperationResultStats;
 

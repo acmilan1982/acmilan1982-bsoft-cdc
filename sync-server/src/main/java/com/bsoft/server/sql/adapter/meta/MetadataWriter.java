@@ -1,5 +1,7 @@
 package com.bsoft.server.sql.adapter.meta;
 
+import com.bsoft.common.bean.DDLBuildContext;
+import com.bsoft.common.bean.DorisBizAttr;
 import com.bsoft.common.bean.TableKeys;
 
 /**
@@ -13,7 +15,8 @@ import com.bsoft.common.bean.TableKeys;
 public interface MetadataWriter {
 
     // 将Oracle的建表语句转换为当前数据库的建表语句
-    String convertOracleCreateTableToCurrentDB(String tableName, String oracleDDL, TableKeys tableKeys);
+    String convertOracleCreateTableToCurrentDB(
+            String tableName, String oracleDDL, TableKeys tableKeys, DDLBuildContext context);
 
     // 执行建表语句
     void executeCreateTable(String createTableSql);

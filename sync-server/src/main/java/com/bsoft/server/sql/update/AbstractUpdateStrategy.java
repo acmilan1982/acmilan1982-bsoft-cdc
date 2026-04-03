@@ -3,7 +3,8 @@ package com.bsoft.server.sql.update;
 
 import com.bsoft.common.bean.KafkaPayload;
 import com.bsoft.common.bean.TargetDataSourceConfig;
-import com.bsoft.common.util.CdcSqlConstants;
+import com.bsoft.common.constants.CdcColumnConstants;
+import com.bsoft.common.constants.CdcSqlConstants;
 
 import com.bsoft.server.sql.adapter.DataSourceHolder;
 import com.bsoft.server.sql.adapter.DatabaseAdapter;
@@ -48,7 +49,7 @@ public abstract class AbstractUpdateStrategy  implements UpdateStrategy {
 
         // 用源表的主键更新，可能存在以下问题:1.源表没有主键 2.多表合并，主键冲突，因此统一用ROWID来更新
         primaryKeySet.clear();
-        primaryKeySet.add(CdcSqlConstants.CDC_ROWID_FIELD);
+        primaryKeySet.add(CdcColumnConstants.CDC_ROWID_COLUMN_LOWER);
 
 
 

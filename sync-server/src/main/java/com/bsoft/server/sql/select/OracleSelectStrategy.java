@@ -2,8 +2,7 @@ package com.bsoft.server.sql.select;
 
 import com.bsoft.common.bean.ColumnChangeInfo;
 import com.bsoft.common.bean.TargetDataSourceConfig;
-import com.bsoft.common.util.CdcSqlConstants;
-import com.bsoft.server.sql.insert.AbstractInsertStrategy;
+import com.bsoft.common.constants.CdcSqlConstants;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 

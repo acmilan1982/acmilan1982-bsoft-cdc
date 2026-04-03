@@ -1,6 +1,6 @@
 package com.bsoft.server.configuration;
 
-import com.bsoft.common.bean.ServerInfo;
+import com.bsoft.common.config.properties.ServerInfo;
 import com.bsoft.common.util.ZooKeeperNodeManager;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;

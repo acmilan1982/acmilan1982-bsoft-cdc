@@ -1,7 +1,7 @@
 
 package com.bsoft.client.signal;
 
-import com.bsoft.common.bean.ClientInfo;
+import com.bsoft.common.config.properties.ClientInfo;
 import com.bsoft.client.dispatcher.ClientJobDispatcher;
 import org.apache.flink.core.execution.JobClient;
 import org.apache.logging.log4j.LogManager;

@@ -72,7 +72,7 @@ public class OracleToKafka extends CDCJob {
 
     // 中心端工具，用来发送建表语句
     @Autowired
-    private ClientController serverClient;
+    private ClientController clientController;
 
     // 业务库
     private BusinessDataSourceConfig businessDataSourceConfig;
@@ -238,7 +238,7 @@ public class OracleToKafka extends CDCJob {
 
         // 2.向中心端发送当前业务库的建表语句
 //        serverClient.fetchAndSendTableMetadata(businessDataSourceConfig);
-        serverClient.initializeMetadataReader(this.businessDataSourceConfig);
+        clientController.initializeMetadataReader(this.businessDataSourceConfig);
         // 3.设置一个启动时间
         clientInfo.notifyClientStart();
 

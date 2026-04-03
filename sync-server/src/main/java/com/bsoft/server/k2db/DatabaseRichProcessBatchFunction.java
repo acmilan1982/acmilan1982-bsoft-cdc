@@ -5,15 +5,21 @@ import com.alibaba.druid.sql.ast.statement.*;
 import com.alibaba.druid.sql.dialect.oracle.ast.stmt.OracleAlterTableModify;
 import com.alibaba.druid.sql.dialect.oracle.parser.OracleStatementParser;
 import com.bsoft.common.bean.*;
+import com.bsoft.common.config.properties.ServerInfo;
+import com.bsoft.common.constants.CdcColumnConstants;
+import com.bsoft.common.constants.CdcSqlConstants;
+import com.bsoft.common.dbmeta.OracleColumnsQueryResult;
+import com.bsoft.common.dbmeta.OracleSqlColumnsQueryRequest;
+import com.bsoft.common.dbmeta.SqlResultCreateTableRequest;
 import com.bsoft.common.enums.DatabaseType;
+import com.bsoft.common.enums.DorisTableModel;
 import com.bsoft.common.enums.TableRowDeleteStrategy;
-import com.bsoft.common.global.GlobalLogCollectorManager;
-import com.bsoft.common.global.GlobalZooKeeperManager;
+import com.bsoft.common.enums.TopicSourceKind;
 import com.bsoft.common.log.LogCollector;
-import com.bsoft.common.log.LogCollector;
+import com.bsoft.common.metric.MonitorMetricEvent;
 import com.bsoft.common.util.DateFormatUtils;
 import com.bsoft.common.util.DateTimeConstants;
-import com.bsoft.server.api.ClientHTTPClient;
+import com.bsoft.server.api.SyncClientHTTPClient;
 import com.bsoft.server.batch.BatchInsertItem;
 import com.bsoft.server.batch.BatchSizeManager;
 import com.bsoft.server.sql.ddl.DDLStrategy;
@@ -49,7 +55,7 @@ public class DatabaseRichProcessBatchFunction extends ProcessFunction<KafkaPaylo
 //    // 目标库的数据源
 //    private transient DataSource hikariDataSource;
 
-    private  ServerInfo serverInfo;
+    private ServerInfo serverInfo;
 
     private ServerTopicInfo serverTopicInfo;
 
@@ -62,8 +68,8 @@ public class DatabaseRichProcessBatchFunction extends ProcessFunction<KafkaPaylo
     // 表行删除策略
     private TableRowDeleteStrategy tableRowDeleteStrategy;
 
-    // 用于写入当前消息的偏移量
-    private transient GlobalZooKeeperManager offsetManager;
+//    // 用于写入当前消息的偏移量
+//    private transient GlobalZooKeeperManager offsetManager;
 
 //    // 移除原有的 LogCollector logCollector 字段
 //    private transient LogCollector logCollector;
@@ -113,7 +119,7 @@ public class DatabaseRichProcessBatchFunction extends ProcessFunction<KafkaPaylo
     // 获取更新策略
     private DDLStrategy ddlStrategy;
 
-    private ClientHTTPClient clientHTTPClient;
+    private SyncClientHTTPClient clientHTTPClient;
 
 
     // 独立线程定时检查快照缓冲区
@@ -129,7 +135,9 @@ public class DatabaseRichProcessBatchFunction extends ProcessFunction<KafkaPaylo
 
 
     // 定义侧输出标签，用于输入日志
-    private  OutputTag<String> SYNC_SERVER_LOG_TAG;
+    private  OutputTag<String> syncLogEntryOutputTag;
+    // 定义侧输出标签，用于输入日志
+    private  OutputTag<String> metricEventOutputTag;
 
     // 日志缓冲队列
     private final Queue<SyncLogEntry> logQueue = new ConcurrentLinkedQueue<>();
@@ -137,8 +145,33 @@ public class DatabaseRichProcessBatchFunction extends ProcessFunction<KafkaPaylo
     private static final ObjectMapper mapper = new ObjectMapper();
 
 
+    // ===== monitor offset 上报参数（建议后续改成配置）=====
+    private static final long SNAPSHOT_REPORT_INTERVAL_MS = 10_000L; // 快照阶段：10s
+    private static final int SNAPSHOT_REPORT_ROWS = 10_000;          // 快照阶段：1w条
+    private static final long REALTIME_REPORT_INTERVAL_MS = 2_000L;  // 实时阶段：2s
+    private static final int REALTIME_REPORT_ROWS = 500;             // 实时阶段：500条
+
+    private enum OffsetPhase { SNAPSHOT, REALTIME }
+
+    // 仅内存态（每个算子实例内）
+    private long latestSnapshotOffset = -1L;
+    private long latestRealtimeOffset = -1L;
+    private long lastSnapshotReportTs = 0L;
+    private long lastRealtimeReportTs = 0L;
+    private int snapshotRowsSinceLastReport = 0;
+    private int realtimeRowsSinceLastReport = 0;
+
+    // doris建表模型
+    private DorisTableModel tableModel;
+
+    // PIPELINE_SQL_RESULT + Doris UNIQUE 表时，从目标表读取到的 UNIQUE KEY
+    private LinkedHashSet<String> targetUniqueKeySet = new LinkedHashSet<>();
+
     // 每个DatabaseRichProcessFunction，只写入指定目标库中的指定表(只会写入一个表)
-    public DatabaseRichProcessBatchFunction(ServerInfo serverInfo, ServerTopicInfo serverTopicInfo,OutputTag<String> SYNC_SERVER_LOG_TAG ) {
+    public DatabaseRichProcessBatchFunction(ServerInfo serverInfo,
+                                            ServerTopicInfo serverTopicInfo,
+                                            OutputTag<String> syncLogEntryOutputTag,
+                                            OutputTag<String> metricEventOutputTag) {
 
         this.serverInfo = serverInfo;
         this.serverTopicInfo = serverTopicInfo;
@@ -159,7 +192,8 @@ public class DatabaseRichProcessBatchFunction extends ProcessFunction<KafkaPaylo
                 targetDataSourceConfig.getDataSourceType() == DatabaseType.DORIS ? -1 : snapshotBatchSize
         );
 
-        this.SYNC_SERVER_LOG_TAG = SYNC_SERVER_LOG_TAG;
+        this.syncLogEntryOutputTag = syncLogEntryOutputTag;
+        this.metricEventOutputTag = metricEventOutputTag;
 
     }
 
@@ -189,7 +223,7 @@ public class DatabaseRichProcessBatchFunction extends ProcessFunction<KafkaPaylo
 
 
         // 10.初始化全局offset管理器（单例模式，只会创建一个实例）
-        this.offsetManager = GlobalZooKeeperManager.getInstance(serverInfo);
+//        this.offsetManager = GlobalZooKeeperManager.getInstance(serverInfo);
 
 
         // 11.使用全局共享的 LogCollector
@@ -199,12 +233,12 @@ public class DatabaseRichProcessBatchFunction extends ProcessFunction<KafkaPaylo
 //        );`
 
         // 12. 注册当前处理的表名到全局offset管理器
-        this.offsetManager.addSourceTableName(this.serverTopicInfo);
+//        this.offsetManager.addSourceTableName(this.serverTopicInfo);
 
 
 
         // 15. 初始化 ClientHTTPClient 实例,用于向探针端请求表结构信息
-        this.clientHTTPClient = new ClientHTTPClient(this.serverInfo);
+        this.clientHTTPClient = new SyncClientHTTPClient(this.serverInfo);
         this.clientHTTPClient.init();
 
         // 16-1 可以自动建表
@@ -212,6 +246,7 @@ public class DatabaseRichProcessBatchFunction extends ProcessFunction<KafkaPaylo
         if(this.serverInfo.isAutoCreateTable() || this.serverInfo.isAutoExpandColumnLength()){
             ensureTableSchemaReady();
         }
+
 
         // 17. 初始化批次管理器的最后刷新时间
         this.batchSizeManager.setLastFlushTime(System.currentTimeMillis());
@@ -236,67 +271,77 @@ public class DatabaseRichProcessBatchFunction extends ProcessFunction<KafkaPaylo
         this.columnInfoList = this.ddlStrategy.getTableColumns(tableName);
 
 
+        this.tableModel = this.targetDataSourceConfig.getTableModel(this.tableName);
+
+
+        // PIPELINE_SQL_RESULT + Doris UNIQUE 表时，从目标表读取到的 UNIQUE KEY
+        initPipelineSqlResultTargetUniqueKeys();
     }
 
 
 
     /**
-     * 确保目标表结构就绪
-     * 核心逻辑：
-     * 1. 表必须存在才能结束方法（无限重试）
-     * 2. 如果表不存在，向探针端请求创建表并等待重试
-     * 3. 如果表存在且需要扩展字段，发送扩展请求并重试
+     * 统一的“目标表就绪”流程：
+     * 1) 检查表是否存在
+     * 2) 不存在则按 sourceKind 请求建表
+     * 3) 存在后仅 TABLE_CDC 场景可触发扩列
      */
     private void ensureTableSchemaReady() {
         int retryCount = 0;
+        TopicSourceKind sourceKind = resolveSourceKind();
 
-        logger.info("🔍 开始检查目标表 {} 是否存在...", tableName);
+        logger.info("开始检查目标表是否就绪: table={}, sourceKind={}", tableName, sourceKind);
 
-        while (true) { // 无限重试，直到表存在
+        while (true) {
             try {
-                // 检查表是否存在
-                boolean tableExists = this.selectStrategy.checkTableExists(this.tableName);
+                boolean exists = this.selectStrategy.checkTableExists(this.tableName);
+                if (exists) {
+                    logger.info("目标表已存在: table={}, sourceKind={}", tableName, sourceKind);
 
-                if (tableExists) {
-                    logger.info("✅ 表 {} 已存在", tableName);
-
-                    // 如果需要扩展字段长度，发送请求并重试验证
-                    if (this.serverInfo.isAutoExpandColumnLength()) {
+                    // 关键约束：PIPELINE_SQL_RESULT 下不做扩列
+                    if (shouldHandleColumnExpansion(sourceKind)) {
                         handleColumnExpansion();
                     }
-
-                    // 表存在且字段扩展处理完成，结束检查
                     return;
                 }
 
-                // 表不存在，向探针端请求创建表
                 retryCount++;
-                logger.info("⚠️ 表 {} 不存在，向探针端发送建表请求（第 {} 次）", tableName, retryCount);
+                logger.info("目标表不存在，准备请求建表: table={}, sourceKind={}, retry={}",
+                        tableName, sourceKind, retryCount);
 
-                requestTableSchemaFromClient();
+                // 向探针端发送建表语句请求
+                requestCreateTableFromClient(sourceKind);
 
-                logger.info("⏳ 建表请求已发送，等待 {} 秒后重新检查...", TimeUnit.MILLISECONDS.toSeconds(TABLE_CHECK_INTERVAL_MS));
+                logger.info("建表请求已发送，等待 {} 秒后重试: table={}, sourceKind={}",
+                        TimeUnit.MILLISECONDS.toSeconds(TABLE_CHECK_INTERVAL_MS), tableName, sourceKind);
 
-                // 等待探针端处理
                 TimeUnit.MILLISECONDS.sleep(TABLE_CHECK_INTERVAL_MS);
 
             } catch (Exception e) {
-                e.printStackTrace();
-                // 所有异常统一处理，记录日志后继续重试
-                logger.warn("⚠️ 检查表 {} 时发生错误（第 {} 次），将继续重试: {}", tableName, retryCount, e.getMessage());
+                logger.warn("目标表就绪检查失败，将继续重试: table={}, sourceKind={}, retry={}, err={}",
+                        tableName, sourceKind, retryCount, e.getMessage());
 
-                // 等待后继续重试
                 try {
                     TimeUnit.MILLISECONDS.sleep(TABLE_CHECK_INTERVAL_MS);
                 } catch (InterruptedException ie) {
-                    // 即使被中断也继续检查
-                    logger.debug("检查被中断，继续重试");
+                    Thread.currentThread().interrupt();
+                    logger.warn("目标表就绪等待被中断: table={}, sourceKind={}", tableName, sourceKind);
+                    return;
                 }
             }
         }
     }
 
+    private TopicSourceKind resolveSourceKind() {
+        return this.serverTopicInfo.getSourceKind() == null
+                ? TopicSourceKind.TABLE_CDC
+                : this.serverTopicInfo.getSourceKind();
+    }
 
+    private boolean shouldHandleColumnExpansion(TopicSourceKind sourceKind) {
+        return sourceKind != TopicSourceKind.PIPELINE_SQL_RESULT
+                && this.serverInfo.isAutoExpandColumnLength();
+    }
     /**
      * 处理字段扩展逻辑
      * 发送扩展请求并重试，达到最大重试次数后结束（不影响任务启动）
@@ -325,23 +370,71 @@ public class DatabaseRichProcessBatchFunction extends ProcessFunction<KafkaPaylo
         logger.info("⚠️ 字段扩展请求达到最大重试次数，跳过扩展（不影响任务启动）");
     }
 
+
+    private void requestCreateTableFromClient(TopicSourceKind sourceKind) throws Exception {
+        if (sourceKind == TopicSourceKind.TABLE_CDC) {
+            requestTableSchemaFromClient();
+        } else {
+            requestSqlSchemaFromClient();
+        }
+    }
+
+
     // 向探针端请求表结构信息，用于建表或扩展字段
     private void requestTableSchemaFromClient() throws Exception {
+
         TableDDLRequest tableDDLRequest = new TableDDLRequest();
-        tableDDLRequest.setClientId(this.serverTopicInfo.getClientId());
+        tableDDLRequest.setClientInfo(this.serverTopicInfo.getClientInfo());
         tableDDLRequest.setSchemaName(this.serverTopicInfo.getSchemaName());
         tableDDLRequest.setTableName(this.serverTopicInfo.getTableName());
-        tableDDLRequest.setTargetDataSourceConfig(this.targetDataSourceConfig);
-        tableDDLRequest.setTableNamingStrategy(this.serverTopicInfo.getTableNamingStrategy());
+        tableDDLRequest.setTargetDataSourceId(this.targetDataSourceConfig.getDataSourceId());
 
         // 复用已有的 ClientHTTPClient 实例
-        this.clientHTTPClient.getTableMetadata(tableDDLRequest);
+        this.clientHTTPClient.requestTableDdlExport(tableDDLRequest);
 
         logger.info("已向探针端发送表结构请求: clientId={}, schema={}, table={}",
                 tableDDLRequest.getClientId(),
                 tableDDLRequest.getSchemaName(),
                 tableDDLRequest.getTableName());
     }
+
+
+    // 向探针端请求 sql 语句执行结果信息，用于建表或扩展字段
+    private void requestSqlSchemaFromClient() throws Exception {
+        String topic = serverTopicInfo.getTopic();
+
+        String clientId = requireNonBlank(serverTopicInfo.getClientId(), "missing clientId, topic=" + topic);
+        String sql = requireNonBlank(serverTopicInfo.getSqlQuery(), "missing sqlQuery, topic=" + topic);
+        String schema = requireNonBlank(serverTopicInfo.getSqlSchemaName(), "missing sqlSchemaName, topic=" + topic);
+        String sqlNodeId = requireNonBlank(serverTopicInfo.getSqlNodeId(), "missing sqlNodeId, topic=" + topic);
+
+
+        if (this.targetDataSourceConfig == null) {
+            throw new IllegalStateException("missing targetDataSourceConfig, topic=" + topic);
+        }
+        String targetTableName = requireNonBlank(this.tableName, "missing targetTableName, topic=" + topic);
+
+        OracleSqlColumnsQueryRequest request = new OracleSqlColumnsQueryRequest();
+        request.setClientId(clientId);
+        request.setSql(sql);
+        request.setSchema(schema);
+        request.setTargetDataSourceId(this.targetDataSourceConfig.getDataSourceId());
+        request.setTargetTableName(targetTableName);
+        request.setSqlNodeId(sqlNodeId);
+
+        logger.info("发送 SQL 建表请求: topic={}, clientId={}, schema={}, targetTable={}",
+                topic, clientId, schema, targetTableName);
+
+        this.clientHTTPClient.requestSqlColumnsExport(request);
+    }
+
+    private String requireNonBlank(String value, String message) {
+        if (value == null || value.trim().isEmpty()) {
+            throw new IllegalArgumentException(message);
+        }
+        return value.trim();
+    }
+
 
     /**
      * 定时检查并刷新快照缓冲区
@@ -441,6 +534,7 @@ public class DatabaseRichProcessBatchFunction extends ProcessFunction<KafkaPaylo
         long startTime = System.currentTimeMillis();
         String op = row.getOp();
 
+
         // 当前消息的操作结果
         OperationResult result = new OperationResult();
         result.setServerId(serverInfo.getServerId());
@@ -472,6 +566,12 @@ public class DatabaseRichProcessBatchFunction extends ProcessFunction<KafkaPaylo
                     }
                 }
 
+                /*
+                     唯一键的规约化处理:
+                     1.如果满足 PIPELINE_SQL_RESULT & DorisTableModel.UNIQUE,那么使用 目标表探测得到的 主键
+                     2.单表CDC，固定使用：CDC_ROWID_COLUMN_LOWER
+                 */
+                normalizePrimaryKeysForWrite(row);
                 // 处理实时数据
                 processRealTimeData(row, out);
             }
@@ -487,23 +587,31 @@ public class DatabaseRichProcessBatchFunction extends ProcessFunction<KafkaPaylo
             result.setExecutionTimeMs(executionTime);
 
 
-            // 异步更新offset，快照阶段结束后，才更新offset
-            if (!snapshotPhaseEnded) {
-                Map<String, String> metric = new HashMap<>();
-                metric.put("topic", this.serverTopicInfo.getTopic());
-                metric.put("targetData SourceId", this.targetDataSourceConfig.getDataSourceId());
-                metric.put("targetTableName", this.tableName);
-                metric.put("offset", row.getOffset().toString());
+//            // 异步更新offset，快照阶段结束后，才更新offset
+//            if (!snapshotPhaseEnded) {
+//                Map<String, String> metric = new HashMap<>();
+//                metric.put(MetricKeys.TOPIC, this.serverTopicInfo.getTopic());
+//                metric.put(MetricKeys.TARGET_DATA_SOURCE_ID, this.targetDataSourceConfig.getDataSourceId());
+//                metric.put(MetricKeys.TARGET_TABLE_NAME, this.tableName);
+//                metric.put(MetricKeys.OFFSET, row.getOffset().toString());
+//
+//                // 异步更新offset
+//                offsetManager.updateOffset(metric);
+//            }
 
-                // 异步更新offset
-                offsetManager.updateOffset(metric);
+            // monitorOffset 近似上报
+            if (result.isSuccess() && row.getOffset() != null) {
+                OffsetPhase phase = snapshotPhaseEnded ? OffsetPhase.REALTIME : OffsetPhase.SNAPSHOT;
+                MonitorMetricEvent monitorMetricEvent = buildMonitorOffsetEventIfDue(row.getOffset(), phase);
+                if(monitorMetricEvent != null){
+                    ctx.output(metricEventOutputTag, mapper.writeValueAsString(monitorMetricEvent));
+                }
             }
-
 
             // 日志输出到侧输出流
             SyncLogEntry logEntry;
             while ((logEntry = logQueue.poll()) != null) {
-                ctx.output(SYNC_SERVER_LOG_TAG, mapper.writeValueAsString(logEntry));
+                ctx.output(syncLogEntryOutputTag, mapper.writeValueAsString(logEntry));
             }
 
 
@@ -613,7 +721,7 @@ public class DatabaseRichProcessBatchFunction extends ProcessFunction<KafkaPaylo
 
         int columnCount = this.columnInfoList.size();
         // 字段数量检查，分组数检查
-        if (columnCount < WIDE_TABLE_COLUMN_THRESHOLD || groupCount < PADDING_GROUP_THRESHOLD) {
+         if (columnCount < WIDE_TABLE_COLUMN_THRESHOLD || groupCount < PADDING_GROUP_THRESHOLD) {
             return false;
         }
 
@@ -832,7 +940,7 @@ public class DatabaseRichProcessBatchFunction extends ProcessFunction<KafkaPaylo
         boolean success = true;
         String logDetail = "插入成功";
         try {
-            this.insertStrategy.executeSingleInsert(tableName, row);
+            this.insertStrategy.executeSingleInsert(this.tableName, row,this.columnInfoList);
         } catch (Exception e) {
             e.printStackTrace();
             success = false;
@@ -851,6 +959,15 @@ public class DatabaseRichProcessBatchFunction extends ProcessFunction<KafkaPaylo
         String logDetail = "更新成功";
 
         try {
+            // Doris DUPLICATE KEY 表不执行 UPDATE/DELETE 实际写库。
+            // 这类表仅保留插入语义，更新和删除在当前链路中记日志后直接跳过。
+            if (shouldSkipMutationForDorisDuplicate()) {
+                logDetail = "Doris DUPLICATE 表跳过 UPDATE，未执行实际写库";
+                logger.info("跳过 UPDATE: targetTable={},", tableName);
+                return;
+            }
+
+            validatePrimaryKeyValuesPresentForMutation(row);
             // 调用策略执行更新
             this.updateStrategy.executeUpdate(tableName, row);
         } catch (Exception e) {
@@ -867,7 +984,24 @@ public class DatabaseRichProcessBatchFunction extends ProcessFunction<KafkaPaylo
 
         try{
 
-            this.deleteStrategy.executeDelete(tableName, row);
+            // Doris DUPLICATE KEY 表不执行 UPDATE/DELETE 实际写库。
+            // 这类表仅保留插入语义，更新和删除在当前链路中记日志后直接跳过。
+            if (shouldSkipMutationForDorisDuplicate()) {
+                logDetail = "Doris DUPLICATE 表跳过 DELETE，未执行实际写库";
+                logger.info("跳过 DELETE: targetTable={},", tableName);
+                return;
+            }
+
+            // 检查消息中是否包含 指定的主键
+            validatePrimaryKeyValuesPresentForMutation(row);
+
+            // 如果满足 PIPELINE_SQL_RESULT & 目标库是doris,那么强迫走物理删除
+            if (shouldForcePhysicalDeleteForPipelineSqlResult()) {
+                this.deleteStrategy.executePhysicalDelete(tableName, row);
+            } else {
+                this.deleteStrategy.executeDelete(tableName, row);
+            }
+
         } catch (Exception e) {
             e.printStackTrace();
             success = false;
@@ -878,6 +1012,15 @@ public class DatabaseRichProcessBatchFunction extends ProcessFunction<KafkaPaylo
 
     }
 
+    /**
+     * Doris DUPLICATE KEY 表不执行 UPDATE/DELETE 实际写库。
+     * 这类表仅保留插入语义，更新和删除在当前链路中记日志后直接跳过。
+     */
+    private boolean shouldSkipMutationForDorisDuplicate() {
+        return this.targetDataSourceConfig != null
+                && this.targetDataSourceConfig.getDataSourceType() == DatabaseType.DORIS
+                && this.tableModel == DorisTableModel.DUPLICATE;
+    }
 
     public void invokeDDL(KafkaPayload row) throws Exception {
         // 获取DDL执行策略
@@ -1151,6 +1294,229 @@ public class DatabaseRichProcessBatchFunction extends ProcessFunction<KafkaPaylo
     }
 
 
+    private MonitorMetricEvent buildMonitorOffsetEventIfDue(long rowOffset, OffsetPhase phase) {
+        // monitorOffset 为近似值：快照/实时都允许按节流策略上报
+        long now = System.currentTimeMillis();
 
+        if (phase == OffsetPhase.SNAPSHOT) {
+            latestSnapshotOffset = Math.max(latestSnapshotOffset, rowOffset);
+            snapshotRowsSinceLastReport++;
+
+            boolean hitRows = snapshotRowsSinceLastReport >= SNAPSHOT_REPORT_ROWS;
+            boolean hitTime = (now - lastSnapshotReportTs) >= SNAPSHOT_REPORT_INTERVAL_MS;
+            if (hitRows || hitTime) {
+                lastSnapshotReportTs = now;
+                snapshotRowsSinceLastReport = 0;
+                return buildOffsetMetricEvent(latestSnapshotOffset);
+            }
+            return null;
+        }
+
+        // REALTIME：每条推进内存 latest，按时间/条数节流上报
+        latestRealtimeOffset = Math.max(latestRealtimeOffset, rowOffset);
+        realtimeRowsSinceLastReport++;
+
+        boolean hitRows = realtimeRowsSinceLastReport >= REALTIME_REPORT_ROWS;
+        boolean hitTime = (now - lastRealtimeReportTs) >= REALTIME_REPORT_INTERVAL_MS;
+        if (hitRows || hitTime) {
+            lastRealtimeReportTs = now;
+            realtimeRowsSinceLastReport = 0;
+            return buildOffsetMetricEvent(latestRealtimeOffset);
+        }
+        return null;
+    }
+
+
+    private MonitorMetricEvent buildOffsetMetricEvent(long offset) {
+        MonitorMetricEvent event = MonitorMetricEvent.offsetEvent(
+                this.serverInfo.getServerId(),
+                this.serverTopicInfo.getTopic(),
+                this.targetDataSourceConfig.getDataSourceId(),
+                this.tableName,
+                offset
+        );
+        event.validate();
+        return event;
+    }
+
+    // PIPELINE_SQL_RESULT + Doris UNIQUE 表时，从目标表读取到的 UNIQUE KEY
+    private void initPipelineSqlResultTargetUniqueKeys() throws Exception {
+        TopicSourceKind sourceKind = resolveSourceKind();
+
+        if (sourceKind != TopicSourceKind.PIPELINE_SQL_RESULT) {
+            return;
+        }
+
+        if (this.targetDataSourceConfig == null) {
+            throw new IllegalStateException(
+                    "PIPELINE_SQL_RESULT missing targetDataSourceConfig, table=" + this.tableName
+            );
+        }
+
+        if (this.targetDataSourceConfig.getDataSourceType() != DatabaseType.DORIS) {
+            throw new IllegalStateException(
+                    "PIPELINE_SQL_RESULT currently requires Doris target, table=" + this.tableName
+                            + ", dbType=" + this.targetDataSourceConfig.getDataSourceType()
+            );
+        }
+
+        if (this.tableModel != DorisTableModel.UNIQUE) {
+            throw new IllegalStateException(
+                    "PIPELINE_SQL_RESULT requires Doris UNIQUE table model, table=" + this.tableName
+                            + ", tableModel=" + this.tableModel
+            );
+        }
+
+        LinkedHashSet<String> resolvedKeys = this.selectStrategy.getTargetUniqueKeys(this.tableName);
+        if (resolvedKeys == null || resolvedKeys.isEmpty()) {
+            throw new IllegalStateException(
+                    "PIPELINE_SQL_RESULT target table has no readable UNIQUE KEY, table=" + this.tableName
+            );
+        }
+
+        this.targetUniqueKeySet = resolvedKeys;
+        validateTargetUniqueKeysExistInTargetColumns();
+
+        logger.info(
+                "Initialized PIPELINE_SQL_RESULT target UNIQUE KEY, table={}, keys={}",
+                this.tableName,
+                this.targetUniqueKeySet
+        );
+    }
+
+    private void validateTargetUniqueKeysExistInTargetColumns() {
+        if (this.columnInfoList == null || this.columnInfoList.isEmpty()) {
+            throw new IllegalStateException("columnInfoList is empty, table=" + this.tableName);
+        }
+
+        Set<String> targetColumns = new LinkedHashSet<>();
+        for (ColumnInfo columnInfo : this.columnInfoList) {
+            if (columnInfo == null || columnInfo.getColumnName() == null) {
+                continue;
+            }
+            targetColumns.add(columnInfo.getColumnName().trim().toLowerCase(Locale.ROOT));
+        }
+
+        LinkedHashSet<String> missingKeys = new LinkedHashSet<>();
+        for (String key : this.targetUniqueKeySet) {
+            if (!targetColumns.contains(key)) {
+                missingKeys.add(key);
+            }
+        }
+
+        if (!missingKeys.isEmpty()) {
+            throw new IllegalStateException(
+                    "Resolved Doris UNIQUE KEY contains columns missing from target schema, table=" + this.tableName
+                            + ", missingKeys=" + missingKeys
+                            + ", targetColumns=" + targetColumns
+            );
+        }
+    }
+
+    public LinkedHashSet<String> getTargetUniqueKeySet() {
+        return new LinkedHashSet<>(this.targetUniqueKeySet);
+    }
+
+
+    // 唯一键的规约化处理,
+
+    /**
+          唯一键的规约化处理:
+          1.如果满足 PIPELINE_SQL_RESULT & DorisTableModel.UNIQUE,那么使用 目标表探测得到的 主键
+          2.单表CDC，固定使用：CDC_ROWID_COLUMN_LOWER
+
+     */
+    private void normalizePrimaryKeysForWrite(KafkaPayload row) {
+        LinkedHashSet<String> effectiveKeys = resolveEffectivePrimaryKeys();
+        row.setPrimaryKeySet(new LinkedHashSet<>(effectiveKeys));
+    }
+
+    // 提取有效的主键
+    private LinkedHashSet<String> resolveEffectivePrimaryKeys() {
+        // 如果满足 PIPELINE_SQL_RESULT & DorisTableModel.UNIQUE,那么使用从 表探测得到的 主键
+        if (shouldUseTargetUniqueKeyForPipelineSqlResult()) {
+            if (this.targetUniqueKeySet == null || this.targetUniqueKeySet.isEmpty()) {
+                throw new IllegalStateException(
+                        "PIPELINE_SQL_RESULT target UNIQUE KEY is empty, table=" + this.tableName
+                );
+            }
+            return new LinkedHashSet<>(this.targetUniqueKeySet);
+        }
+
+        // 单表CDC，固定使用：CDC_ROWID_COLUMN_LOWER
+        LinkedHashSet<String> fallbackKeys = new LinkedHashSet<>();
+        fallbackKeys.add(CdcColumnConstants.CDC_ROWID_COLUMN_LOWER);
+        return fallbackKeys;
+    }
+
+    // 检查消息中是否包含 指定的主键
+    private void validatePrimaryKeyValuesPresentForMutation(KafkaPayload row) {
+        Set<String> effectiveKeys = row.getPrimaryKeySet();
+        if (effectiveKeys == null || effectiveKeys.isEmpty()) {
+            throw new IllegalStateException("effectiveKeys is empty, table=" + this.tableName);
+        }
+
+        String op = row.getOp();
+        Map<String, Object> data = "d".equalsIgnoreCase(op) ? row.getBeforeData() : row.getAfterData();
+
+        if (data == null) {
+            throw new IllegalStateException(
+                    "payload data is null for op=" + op + ", table=" + this.tableName
+            );
+        }
+
+        LinkedHashSet<String> missingKeys = new LinkedHashSet<>();
+        for (String key : effectiveKeys) {
+            Object value = findValueIgnoreCase(data, key);
+            if (value == null) {
+                missingKeys.add(key);
+            }
+        }
+
+        if (!missingKeys.isEmpty()) {
+            throw new IllegalStateException(
+                    "missing primary key values for mutation, table=" + this.tableName
+                            + ", op=" + op
+                            + ", keys=" + effectiveKeys
+                            + ", missingKeys=" + missingKeys
+                            + ", payloadFields=" + data.keySet()
+            );
+        }
+    }
+
+    private Object findValueIgnoreCase(Map<String, Object> data, String key) {
+        if (data == null || key == null) {
+            return null;
+        }
+
+        Object direct = data.get(key);
+        if (direct != null) {
+            return direct;
+        }
+
+        String keyLower = key.toLowerCase(Locale.ROOT);
+        for (Map.Entry<String, Object> entry : data.entrySet()) {
+            if (entry.getKey() != null
+                    && entry.getKey().toLowerCase(Locale.ROOT).equals(keyLower)) {
+                return entry.getValue();
+            }
+        }
+        return null;
+    }
+
+    // 如果满足 PIPELINE_SQL_RESULT & DorisTableModel.UNIQUE,那么使用从 表探测得到的 主键
+    private boolean shouldUseTargetUniqueKeyForPipelineSqlResult() {
+        return resolveSourceKind() == TopicSourceKind.PIPELINE_SQL_RESULT
+                && this.targetDataSourceConfig != null
+                && this.targetDataSourceConfig.getDataSourceType() == DatabaseType.DORIS
+                && this.tableModel == DorisTableModel.UNIQUE;
+    }
+
+    // 如果满足 PIPELINE_SQL_RESULT & 目标库是doris,那么强迫走物理删除
+    private boolean shouldForcePhysicalDeleteForPipelineSqlResult() {
+        return resolveSourceKind() == TopicSourceKind.PIPELINE_SQL_RESULT
+                && this.targetDataSourceConfig != null
+                && this.targetDataSourceConfig.getDataSourceType() == DatabaseType.DORIS;
+    }
 
 }

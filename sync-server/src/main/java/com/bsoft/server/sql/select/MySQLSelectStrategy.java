@@ -2,11 +2,9 @@ package com.bsoft.server.sql.select;
 
 import com.bsoft.common.bean.ColumnChangeInfo;
 import com.bsoft.common.bean.TargetDataSourceConfig;
-import com.bsoft.common.util.CdcSqlConstants;
+import com.bsoft.common.constants.CdcSqlConstants;
 
-import java.sql.Connection;
 import java.sql.PreparedStatement;
-import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.util.HashMap;
 import java.util.Map;

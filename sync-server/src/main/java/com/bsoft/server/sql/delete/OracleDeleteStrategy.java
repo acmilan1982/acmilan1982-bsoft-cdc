@@ -45,7 +45,7 @@ public class OracleDeleteStrategy extends AbstractDeleteStrategy {
                 return String.format("delete from %s where %s", tableName, whereClause);
             case DELETE_FLAG:
                 // 逻辑删除：更新删除标记
-                return String.format("update %s set cdc_op = 'd' ,cdc_delete_flag = 1 ,cdc_delete_time = SYSDATE where %s", tableName, whereClause);
+                return String.format("update %s set cdc_rowid = ?,cdc_op = 'd' ,cdc_delete_flag = 1 ,cdc_delete_time = SYSDATE ,cdc_update_time = SYSDATE where %s",tableName,whereClause);
 
             default:
                 throw new IllegalArgumentException("不支持的删除策略: " + tableRowDeleteStrategy);

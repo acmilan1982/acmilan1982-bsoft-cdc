@@ -1,7 +1,7 @@
 package com.bsoft.log.dispatcher;
 
 
-import com.bsoft.common.bean.LogServerInfo;
+import com.bsoft.common.config.properties.LogServerInfo;
 import com.bsoft.log.k2db.LogPersistenceJob;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;

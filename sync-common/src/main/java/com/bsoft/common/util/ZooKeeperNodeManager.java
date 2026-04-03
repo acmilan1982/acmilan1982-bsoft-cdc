@@ -10,8 +10,8 @@ package com.bsoft.common.util;
  */
 
 import com.alibaba.fastjson.JSON;
-import com.bsoft.common.bean.ClientInfo;
-import com.bsoft.common.bean.ServerInfo;
+import com.bsoft.common.config.properties.ClientInfo;
+import com.bsoft.common.config.properties.ServerInfo;
 import com.bsoft.common.enums.JobStatus;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;

@@ -1,20 +1,13 @@
 package com.bsoft.client.function;
 
-import com.bsoft.common.bean.ClientInfo;
+import com.bsoft.common.config.properties.ClientInfo;
 import com.bsoft.common.global.GlobalZooKeeperManager;
-import com.bsoft.common.util.ZooKeeperNodeManager;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.apache.flink.api.common.functions.RichMapFunction;
 import org.apache.flink.configuration.Configuration;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
-
-import javax.annotation.PreDestroy;
-import java.time.Instant;
-import java.util.concurrent.Executors;
-import java.util.concurrent.ScheduledExecutorService;
-import java.util.concurrent.TimeUnit;
 
 /**
  * ClassName: OracleSourceLog

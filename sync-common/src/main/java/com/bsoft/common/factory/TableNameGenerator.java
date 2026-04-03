@@ -39,32 +39,90 @@ public class TableNameGenerator {
 //    }
 
     // 生成目标表名
-    public String generateTargetTableName(TableMappingConfig tableMappingConfig, DatabaseType databaseType,TableNamingStrategy tableNamingStrategy) {
+    public String generateTargetTableName(String clientId,
+                                          TableMappingConfig tableMappingConfig,
+                                          DatabaseType databaseType,
+                                          TableNamingStrategy tableNamingStrategy) {
+        return generateTargetTableName(clientId,tableMappingConfig,databaseType,tableNamingStrategy,"","");
+    }
+
+    // 生成目标表名
+    public String generateTargetTableName(String clientId,
+                                          TableMappingConfig tableMappingConfig,
+                                          DatabaseType databaseType,
+                                          TableNamingStrategy tableNamingStrategy,
+                                          String tableNamePrefix,
+                                          String tableNameSuffix) {
         // 1. 先根据命名策略生成表名
-        String targetTableName = generateTargetTableName(tableMappingConfig,tableNamingStrategy);
+        String targetTableName = generateTargetTableName(clientId,tableMappingConfig,tableNamingStrategy,tableNamePrefix,tableNameSuffix);
         // 2. 再根据库的类型，选择 表名 大写还是 小写
         return applyDatabaseSpecificFormatting(targetTableName, databaseType);
     }
 
-//    // 根据 目标表的命名策略 生成表名
-//    private String generateTargetTableName(TableMappingConfig tableMappingConfig) {
-//        return generateTargetTableName(tableMappingConfig,this.tableNamingStrategy);
-//    }
+    // 生成目标表名
+    public String generateTargetTableName(String clientId,
+                                          String schemaName,
+                                          String tableName,
+                                          DatabaseType databaseType,
+                                          TableNamingStrategy tableNamingStrategy,
+                                          String tableNamePrefix,
+                                          String tableNameSuffix) {
+        // 1. 先根据命名策略生成表名
+        String targetTableName = generateTargetTableName(clientId,schemaName,tableName,tableNamingStrategy,tableNamePrefix,tableNameSuffix);
+        // 2. 再根据库的类型，选择 表名 大写还是 小写
+        return applyDatabaseSpecificFormatting(targetTableName, databaseType);
+    }
+
+
+
+
 
     // 根据 目标表的命名策略 生成表名
-    private String generateTargetTableName(TableMappingConfig tableMappingConfig,TableNamingStrategy tableNamingStrategy) {
-        String targetTableName = null;
+    private String generateTargetTableName(String clientId,
+                                           TableMappingConfig tableMappingConfig,
+                                           TableNamingStrategy tableNamingStrategy,
+                                           String tableNamePrefix,
+                                           String tableNameSuffix) {
+        return generateTargetTableName(clientId,
+                tableMappingConfig.getSchemaName(),
+                tableMappingConfig.getTableName(),
+                tableNamingStrategy,
+                tableNamePrefix,
+                tableNameSuffix);
+    }
+
+
+    // 根据 目标表的命名策略 生成表名
+    public String  generateTargetTableName(String clientId,
+                                          ExecutionPlan.TableExecutionPlan tableExecutionPlan) {
+        return generateTargetTableName(clientId,
+                tableExecutionPlan.getSchemaName(),
+                tableExecutionPlan.getTableName(),
+                tableExecutionPlan.getTableNamingStrategy(),
+                tableExecutionPlan.getTableNamePrefix(),
+                tableExecutionPlan.getTableNameSuffix());
+    }
+
+    // 根据 目标表的命名策略 生成表名
+    public String generateTargetTableName(String clientId,
+                                          String sourceSchema,
+                                          String sourceTableName,
+                                          TableNamingStrategy tableNamingStrategy,
+                                          String tableNamePrefix,
+                                          String tableNameSuffix) {
+
+        String targetTableName;
         // 目标表的类型
         switch (tableNamingStrategy) {
             case TABLE_MERGE:
             case TABLE_PREFIX:
-                targetTableName =  tableMappingConfig.getTableName();
+                targetTableName = sourceTableName;
+                break;
+            case CUSTOM_PREFIX:      // 自定义前缀
+                targetTableName =  tableNamePrefix + sourceTableName + tableNameSuffix;
                 break;
             case CLIENTID_SCHEMA_TABLE:
-                targetTableName = generateUniqueTableName(tableMappingConfig.getBusinessDataSourceConfig().getClientId(),
-                        tableMappingConfig.getSchemaName(),
-                        tableMappingConfig.getTableName());
-
+                targetTableName = generateUniqueTableName(clientId, sourceSchema, sourceTableName);
                 break;
             default:
                 throw new IllegalStateException("不支持的目标表表名生成策略: " + tableNamingStrategy);
@@ -72,33 +130,9 @@ public class TableNameGenerator {
         return targetTableName;
     }
 
-
-
-
-
-    // 根据 目标表的命名策略 生成表名
-    public String generateTargetTableName(String clientId,
-                                          ExecutionPlan.TableExecutionPlan tableExecutionPlan) {
-
-        String targetTableName;
-        // 目标表的类型
-        switch (tableExecutionPlan.getTableNamingStrategy()) {
-            case TABLE_MERGE:
-            case TABLE_PREFIX:
-                targetTableName = tableExecutionPlan.getTableName();
-                break;
-            case CLIENTID_SCHEMA_TABLE:
-                targetTableName = generateUniqueTableName(clientId, tableExecutionPlan.getSchemaName(), tableExecutionPlan.getTableName());
-                break;
-            default:
-                throw new IllegalStateException("不支持的目标表表名生成策略: " + tableExecutionPlan.getTableNamingStrategy());
-        }
-        return targetTableName;
-    }
-
     // 绝对唯一的表名生成方式
-    public String generateUniqueTableName(String clientId, String schemaName, String tableName) {
-        return clientId + "_" + schemaName + "_" + tableName;
+    public String generateUniqueTableName(String clientId, String schema, String tableName) {
+        return clientId + "_" + schema + "_" + tableName;
     }
 
     // 根据 根据库的类型，选择 表名 大写还是 小写

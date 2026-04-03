@@ -1,5 +1,8 @@
 package com.bsoft.common.bean;
 
+import com.bsoft.common.config.properties.ClientInfo;
+import com.bsoft.common.config.properties.ServerInfo;
+import com.bsoft.common.config.properties.SimpleClientInfo;
 import com.bsoft.common.enums.JobStartupMode;
 import com.bsoft.common.enums.TableNamingStrategy;
 import com.bsoft.common.enums.TableStatus;
@@ -86,14 +89,13 @@ public class ExecutionPlan implements Serializable {
     }
 
     // 便利方法：添加执行计划项
-    public void addPlanItem(String fromDataSourceId, String toDataSourceId,String schemaName, String tableName, String tableStatus,String clientId,TableNamingStrategy tableNamingStrategy) {
+    public void addPlanItem(String fromDataSourceId, String toDataSourceId, String schemaName, String tableName, String tableStatus, SimpleClientInfo clientInfo) {
         addPlanItem(new TableExecutionPlan(fromDataSourceId,
                                            toDataSourceId,
                                            schemaName,
                                            tableName,
                                            TableStatus.valueOf(tableStatus),
-                                           clientId,
-                                           tableNamingStrategy
+                                           clientInfo
         ));
     }
 
@@ -232,23 +234,19 @@ public class ExecutionPlan implements Serializable {
         // 状态
         private TableStatus tableStatus;
 
-        // 客户端id
-        private String clientId;
-
-        // 客户端在目标库的表命名策略
-        private TableNamingStrategy tableNamingStrategy;
+        // 客户端相关配置聚合到一个对象里
+        private SimpleClientInfo clientInfo;
 
         public TableExecutionPlan() {
         }
 
-        public TableExecutionPlan(String fromDataSourceId, String toDataSourceId, String schemaName, String tableName, TableStatus tableStatus,String clientId,TableNamingStrategy tableNamingStrategy) {
+        public TableExecutionPlan(String fromDataSourceId, String toDataSourceId, String schemaName, String tableName, TableStatus tableStatus,SimpleClientInfo clientInfo) {
             this.fromDataSourceId = fromDataSourceId;
             this.toDataSourceId = toDataSourceId;
             this.schemaName = schemaName;
             this.tableName = tableName;
             this.tableStatus = tableStatus;
-            this.clientId = clientId;
-            this.tableNamingStrategy = tableNamingStrategy;
+            this.clientInfo = clientInfo;
         }
 
         public String getFromDataSourceId() {
@@ -299,20 +297,31 @@ public class ExecutionPlan implements Serializable {
             return tableStatus == TableStatus.SNAPSHOT;
         }
 
-        public String getClientId() {
-            return clientId;
-        }
 
-        public void setClientId(String clientId) {
-            this.clientId = clientId;
+        // 兼容旧调用方，后续可以逐步删掉
+        public String getClientId() {
+            return this.clientInfo.getClientId();
         }
 
         public TableNamingStrategy getTableNamingStrategy() {
-            return tableNamingStrategy;
+            return this.clientInfo.getTableNamingStrategy();
         }
 
-        public void setTableNamingStrategy(TableNamingStrategy tableNamingStrategy) {
-            this.tableNamingStrategy = tableNamingStrategy;
+        public String getTableNamePrefix() {
+            return this.clientInfo.getTableNamePrefix();
+        }
+
+        public String getTableNameSuffix() {
+            return this.clientInfo.getTableNameSuffix();
+        }
+
+
+        public SimpleClientInfo getClientInfo() {
+            return clientInfo;
+        }
+
+        public void setClientInfo(SimpleClientInfo clientInfo) {
+            this.clientInfo = clientInfo;
         }
     }
 

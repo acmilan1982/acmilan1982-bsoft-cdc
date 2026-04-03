@@ -1,6 +1,6 @@
 package com.bsoft.client.dispatcher;
 
-import com.bsoft.common.bean.ClientInfo;
+import com.bsoft.common.config.properties.ClientInfo;
 import com.bsoft.client.o2k.OracleToKafka;
 import com.bsoft.common.enums.JobStartupMode;
 import org.apache.flink.core.execution.JobClient;

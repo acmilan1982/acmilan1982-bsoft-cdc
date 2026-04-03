@@ -1,15 +1,14 @@
 package com.bsoft.server.k2db;
 
 import com.bsoft.common.bean.KafkaPayload;
-import com.bsoft.common.util.CdcSqlConstants;
+import com.bsoft.common.constants.CdcColumnConstants;
+import com.bsoft.common.constants.CdcSqlConstants;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 
-import java.time.Instant;
 import java.time.LocalDateTime;
-import java.time.ZoneId;
 import java.time.format.DateTimeFormatter;
 import java.util.*;
 
@@ -107,10 +106,10 @@ public class OracleCdcJsonParser  {
 
         // 消息中的cdc_rowid实际值就是ROWID
         // 给cdc_rowid字段加上数据源前缀，避免不同数据源间的ROWID冲突
-        beforeMap.computeIfPresent(CdcSqlConstants.CDC_ROWID_FIELD,
+        beforeMap.computeIfPresent(CdcColumnConstants.CDC_ROWID_COLUMN_LOWER,
                 (key, nodeValue) -> businessDataSourceId  + "_" + nodeValue);
 
-        afterMap.computeIfPresent(CdcSqlConstants.CDC_ROWID_FIELD,
+        afterMap.computeIfPresent(CdcColumnConstants.CDC_ROWID_COLUMN_LOWER,
                 (key, nodeValue) -> businessDataSourceId  + "_" + nodeValue);
 
         // ✅ 累计执行时间

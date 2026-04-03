@@ -1,7 +1,7 @@
 package com.bsoft.server.dispatcher;
 
 
-import com.bsoft.common.bean.ServerInfo;
+import com.bsoft.common.config.properties.ServerInfo;
 
 import com.bsoft.server.k2db.KafkaToDB;
 import org.apache.logging.log4j.LogManager;

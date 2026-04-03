@@ -14,6 +14,7 @@ import com.bsoft.common.bean.TargetDataSourceConfig;
 
 import java.sql.PreparedStatement;
 import java.sql.SQLException;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -35,4 +36,16 @@ public interface SelectStrategy {
 
 
     Map<String, ColumnChangeInfo> getTableColumns(String tableName);
+
+
+    /**
+     * 获取目标表用于唯一定位一行的键集合。
+     *
+     * 默认仅 Doris UNIQUE KEY 表支持。
+     * 其他数据库或不支持的实现可返回空集合，或者抛出 UnsupportedOperationException。
+     */
+    default LinkedHashSet<String> getTargetUniqueKeys(String tableName) throws Exception {
+        return new LinkedHashSet<>();
+    }
+
 }

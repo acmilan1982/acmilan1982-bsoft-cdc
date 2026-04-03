@@ -41,7 +41,8 @@ public class MySQLDDLStrategy extends AbstractDDLStrategy {
 
 
     @Override
-    public String convertOracleCreateTableToCurrentDB(String newTableName, String oracleCreateTableSql, TableKeys tableKey) {
+    public String convertOracleCreateTableToCurrentDB(String newTableName, String oracleCreateTableSql,
+                                                      TableKeys tableKey, DDLBuildContext context) {
         try {
             // 解析Oracle建表语句
             OracleStatementParser parser = new OracleStatementParser(oracleCreateTableSql);
