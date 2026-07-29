@@ -19,16 +19,21 @@ public class TableDDLRequest {
 
     private SimpleClientInfo clientInfo;
 
+    // 业务库 dataSourceId
+    private String businessDataSourceId;
+
     // 目标库 dataSourceId
     private String targetDataSourceId;
 
     public TableDDLRequest() {
     }
 
-    public TableDDLRequest(String targetDataSourceId,
+    public TableDDLRequest(String businessDataSourceId,
+                           String targetDataSourceId,
                            SimpleClientInfo clientInfo,
                            String schemaName,
                            String tableName) {
+        this.businessDataSourceId = businessDataSourceId;
         this.targetDataSourceId = targetDataSourceId;
         this.clientInfo = clientInfo;
         this.schemaName = schemaName;
@@ -74,15 +79,12 @@ public class TableDDLRequest {
         return clientInfo == null ? null : clientInfo.getClientId();
     }
 
-    public TableNamingStrategy getTableNamingStrategy() {
-        return clientInfo == null ? null : clientInfo.getTableNamingStrategy();
+
+    public String getBusinessDataSourceId() {
+        return businessDataSourceId;
     }
 
-    public String getTableNamePrefix() {
-        return clientInfo == null ? null : clientInfo.getTableNamePrefix();
-    }
-
-    public String getTableNameSuffix() {
-        return clientInfo == null ? null : clientInfo.getTableNameSuffix();
+    public void setBusinessDataSourceId(String businessDataSourceId) {
+        this.businessDataSourceId = businessDataSourceId;
     }
 }

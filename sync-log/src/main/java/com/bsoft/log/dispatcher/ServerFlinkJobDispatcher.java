@@ -1,7 +1,7 @@
 package com.bsoft.log.dispatcher;
 
 
-import com.bsoft.common.config.properties.LogServerInfo;
+
 import com.bsoft.log.k2db.LogPersistenceJob;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
@@ -22,9 +22,6 @@ public class ServerFlinkJobDispatcher implements CommandLineRunner {
     private static final Logger logger = LogManager.getLogger(ServerFlinkJobDispatcher.class);
 
 
-    // 服务端信息
-    @Autowired
-    private LogServerInfo logServerInfo;
 
 
     @Autowired

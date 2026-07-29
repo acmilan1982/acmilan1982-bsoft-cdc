@@ -41,6 +41,9 @@ public class BatchSizeManager implements Serializable {
     // Doris Stream Load 相关配置
     private static final int DEFAULT_STREAM_LOAD_BATCH_SIZE = 1000;
     private static final int MIN_STREAM_LOAD_BATCH_SIZE = 500;
+
+//    private static final int DEFAULT_STREAM_LOAD_BATCH_SIZE = 100;
+//    private static final int MIN_STREAM_LOAD_BATCH_SIZE = 100;
     private static final int MAX_STREAM_LOAD_BATCH_SIZE = 10000;
     private static final long TARGET_BATCH_BYTES = 100 * 1024 * 1024; // 100MB目标大小
 
@@ -54,11 +57,17 @@ public class BatchSizeManager implements Serializable {
 //    // 30秒强制刷新,即使没有从kafka读取到数据，也会触发这个时间
 //    public static final long FORCE_FLUSH_THRESHOLD_MS = 30000;
 
-
-
-
-
     private int currentBatchSize;
+
+
+
+
+    // 实时新增数据批量写入的最大等待时间。
+    // 只用于 TargetTableWriteProcessFunction 的 processing-time timer。
+    // 不复用 lastFlushTime，避免和快照 flush 逻辑耦合。
+    private static final long REALTIME_INSERT_FLUSH_INTERVAL_MS = 60 * 1000L;
+
+
 
     public BatchSizeManager(DatabaseType databaseType, int initialBatchSize) {
         this.databaseType = databaseType;
@@ -198,5 +207,11 @@ public class BatchSizeManager implements Serializable {
 
     public long getFlushIntervalMs() {
         return flushIntervalMs;
+    }
+
+    // 获取实时新增数据批量 flush 间隔。
+    // 当前固定 60 秒，不从配置文件读取。
+    public long getRealtimeInsertFlushIntervalMs() {
+        return REALTIME_INSERT_FLUSH_INTERVAL_MS;
     }
 }

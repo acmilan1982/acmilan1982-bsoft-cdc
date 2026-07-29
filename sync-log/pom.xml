@@ -187,7 +187,7 @@
                 <artifactId>spring-boot-maven-plugin</artifactId>
                 <version>2.7.18</version>
                 <configuration>
-                    <mainClass>com.bsoft.server.bootapp.ServerApplication</mainClass>
+                    <mainClass>com.bsoft.log.bootapp.ServerApplication</mainClass>
                     <layout>JAR</layout>
                     <classifier>boot</classifier>
                 </configuration>

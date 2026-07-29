@@ -8,9 +8,10 @@ import java.util.HashMap;
 import java.util.Map;
 
 public class PlanContext {
+    public static final String RUNTIME_ARG_KAFKA_BOOTSTRAP_SERVERS = "kafka.bootstrapServers";
+
     private final StreamExecutionEnvironment env;
     private final StreamTableEnvironment tableEnv;
-
     /*
     1. Node之间的数据交换，通过 datasetMap 来实现，
     2. datasetMap 用于存储每个节点的输出数据，以便后续节点可以访问和处理。
@@ -68,5 +69,23 @@ public class PlanContext {
         }
         String s = String.valueOf(v).trim();
         return s.isEmpty() ? null : s;
+    }
+
+    public void setKafkaBootstrapServers(String kafkaBootstrapServers) {
+        putRuntimeArg(RUNTIME_ARG_KAFKA_BOOTSTRAP_SERVERS, kafkaBootstrapServers);
+    }
+
+    public String getKafkaBootstrapServers() {
+        return getRuntimeArgAsString(RUNTIME_ARG_KAFKA_BOOTSTRAP_SERVERS);
+    }
+
+    public String requireKafkaBootstrapServers() {
+        String servers = getKafkaBootstrapServers();
+        if (servers == null) {
+            throw new IllegalStateException(
+                    "missing runtime arg: " + RUNTIME_ARG_KAFKA_BOOTSTRAP_SERVERS
+            );
+        }
+        return servers;
     }
 }

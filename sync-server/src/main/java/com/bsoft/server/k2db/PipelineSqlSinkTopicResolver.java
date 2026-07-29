@@ -108,7 +108,7 @@ public class PipelineSqlSinkTopicResolver {
                     t.setSourceKind(TopicSourceKind.PIPELINE_SQL_RESULT);
 
                     // 生成主题名
-                    t.setTopic(TopicNameFactory.generateAssocTopic(finalTargetTableName,targetDataSourceId));
+                    t.setTopic(TopicNameFactory.generateAssocTopic("",finalTargetTableName,targetDataSourceId));
 
                     t.setBusinessDataSourceId(sourceDataSourceId);
                     t.setTargetDataSourceId(targetDataSourceId);

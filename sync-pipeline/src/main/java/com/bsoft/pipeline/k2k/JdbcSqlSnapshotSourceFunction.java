@@ -6,13 +6,12 @@ import org.apache.flink.api.java.typeutils.RowTypeInfo;
 import org.apache.flink.streaming.api.functions.source.RichSourceFunction;
 import org.apache.flink.types.Row;
 import org.apache.flink.types.RowKind;
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Logger;
 
 import javax.sql.DataSource;
 import java.math.BigDecimal;
-import java.sql.Connection;
-import java.sql.PreparedStatement;
-import java.sql.ResultSet;
-import java.sql.Timestamp;
+import java.sql.*;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
@@ -27,6 +26,8 @@ import java.util.Locale;
 
 public class JdbcSqlSnapshotSourceFunction extends RichSourceFunction<Row> {
 
+    private static final Logger logger = LogManager.getLogger(JdbcSqlSnapshotSourceFunction.class);
+
     private static final int DEFAULT_FETCH_SIZE = 1000;
 
     private final BusinessDataSourceConfig sourceConfig;
@@ -34,18 +35,35 @@ public class JdbcSqlSnapshotSourceFunction extends RichSourceFunction<Row> {
     private final String sql;
     private final List<OracleColumnMetadata> columns;
     private final RowTypeInfo rowTypeInfo;
+    private int count = 0;
 
     private volatile boolean running = true;
+
+    // 快照读取基线 SCN
+    private final Long snapshotScn;
 
     public JdbcSqlSnapshotSourceFunction(BusinessDataSourceConfig sourceConfig,
                                          String schema,
                                          String sql,
+                                         Long snapshotScn,
                                          List<OracleColumnMetadata> columns,
                                          RowTypeInfo rowTypeInfo) {
+        // 保存源库配置
         this.sourceConfig = sourceConfig;
+
+        // 保存 schema
         this.schema = schema;
+
+        // 保存原始 SQL
         this.sql = sql;
+
+        // 保存 snapshot SCN
+        this.snapshotScn = snapshotScn;
+
+        // 保存字段元数据副本
         this.columns = columns == null ? null : new ArrayList<>(columns);
+
+        // 保存 Flink RowTypeInfo
         this.rowTypeInfo = rowTypeInfo;
     }
 
@@ -55,53 +73,53 @@ public class JdbcSqlSnapshotSourceFunction extends RichSourceFunction<Row> {
 
     @Override
     public void run(SourceContext<Row> ctx) throws Exception {
+        // 校验源库配置
         if (sourceConfig == null) {
             throw new IllegalArgumentException("sourceConfig is null");
         }
+
+        // 校验字段列表
         if (columns == null || columns.isEmpty()) {
             throw new IllegalArgumentException("columns is empty");
         }
+
+        // 校验 RowTypeInfo
         if (rowTypeInfo == null) {
             throw new IllegalArgumentException("rowTypeInfo is null");
         }
+
+        // 校验 SQL
         if (sql == null || sql.trim().isEmpty()) {
             throw new IllegalArgumentException("sql is blank");
         }
 
+        // 校验 snapshotScn
+        if (snapshotScn == null || snapshotScn <= 0) {
+            throw new IllegalArgumentException("snapshotScn is null or invalid");
+        }
+
+        // 获取数据源
         DataSource dataSource = sourceConfig.getDataSource();
 
+        // 获取 JDBC 连接
         try (Connection conn = dataSource.getConnection()) {
+            // 设置只读连接
             conn.setReadOnly(true);
 
+            // 设置当前 schema
             if (schema != null && !schema.trim().isEmpty()) {
-                try (PreparedStatement alterSchema = conn.prepareStatement(
-                        "ALTER SESSION SET CURRENT_SCHEMA = " + quoteIdentifier(schema))) {
-                    alterSchema.execute();
-                }
+                executeSessionSql(conn, "ALTER SESSION SET CURRENT_SCHEMA = " + quoteIdentifier(schema));
             }
 
-            try (PreparedStatement ps = conn.prepareStatement(
-                    sql,
-                    ResultSet.TYPE_FORWARD_ONLY,
-                    ResultSet.CONCUR_READ_ONLY)) {
+            // 使用 DBMS_FLASHBACK 将当前 session 固定到 snapshotScn
+            enableFlashbackScn(conn, snapshotScn);
 
-                ps.setFetchSize(DEFAULT_FETCH_SIZE);
-
-                try (ResultSet rs = ps.executeQuery()) {
-                    while (running && rs.next()) {
-                        Row row = new Row(RowKind.INSERT, columns.size());
-
-                        for (int i = 0; i < columns.size(); i++) {
-                            OracleColumnMetadata column = columns.get(i);
-                            Object jdbcValue = rs.getObject(i + 1);
-                            row.setField(i, normalizeJdbcValue(jdbcValue, column));
-                        }
-
-                        synchronized (ctx.getCheckpointLock()) {
-                            ctx.collect(row);
-                        }
-                    }
-                }
+            try {
+                // 执行原始 snapshot SQL
+                executeSnapshotQuery(conn, ctx);
+            } finally {
+                // 连接归还连接池前关闭 flashback，避免污染后续复用
+                disableFlashbackQuietly(conn);
             }
         }
     }
@@ -164,6 +182,68 @@ public class JdbcSqlSnapshotSourceFunction extends RichSourceFunction<Row> {
         }
     }
 
+    private void executeSnapshotQuery(Connection conn, SourceContext<Row> ctx) throws Exception {
+        // 创建只读前向游标 PreparedStatement
+        try (PreparedStatement ps = conn.prepareStatement(
+                sql,
+                ResultSet.TYPE_FORWARD_ONLY,
+                ResultSet.CONCUR_READ_ONLY)) {
+
+            // 设置 fetch size，避免一次性拉取过多数据
+            ps.setFetchSize(DEFAULT_FETCH_SIZE);
+
+            // 执行原始 SQL
+            try (ResultSet rs = ps.executeQuery()) {
+                // 持续读取结果集
+                while (running && rs.next()) {
+                    logger.info("sql执行，已输出 {} ", count++);
+
+                    // 构造 INSERT Row
+                    Row row = new Row(RowKind.INSERT, columns.size());
+
+                    // 按列读取 JDBC 值并转换
+                    for (int i = 0; i < columns.size(); i++) {
+                        OracleColumnMetadata column = columns.get(i);
+                        Object jdbcValue = rs.getObject(i + 1);
+                        row.setField(i, normalizeJdbcValue(jdbcValue, column));
+                    }
+
+                    // 使用 Flink checkpoint lock 发出数据
+                    synchronized (ctx.getCheckpointLock()) {
+                        ctx.collect(row);
+                    }
+                }
+            }
+        }
+    }
+
+    private void executeSessionSql(Connection conn, String sql) throws Exception {
+        // 执行 session 级 SQL
+        try (Statement statement = conn.createStatement()) {
+            statement.execute(sql);
+        }
+    }
+
+    private void enableFlashbackScn(Connection conn, long snapshotScn) throws Exception {
+        // 使用 SYS.DBMS_FLASHBACK，避免 public synonym 不存在导致 DBMS_FLASHBACK 不可见
+        try (CallableStatement statement = conn.prepareCall(
+                "BEGIN SYS.DBMS_FLASHBACK.ENABLE_AT_SYSTEM_CHANGE_NUMBER(?); END;")) {
+            statement.setLong(1, snapshotScn);
+            statement.execute();
+        }
+
+        logger.info("oracle flashback enabled, snapshotScn={}", snapshotScn);
+    }
+
+    private void disableFlashbackQuietly(Connection conn) {
+        try (CallableStatement statement = conn.prepareCall(
+                "BEGIN SYS.DBMS_FLASHBACK.DISABLE; END;")) {
+            statement.execute();
+            logger.info("oracle flashback disabled");
+        } catch (Exception e) {
+            logger.warn("failed to disable oracle flashback session", e);
+        }
+    }
     private Object normalizeNumber(Object jdbcValue, OracleColumnMetadata column) {
         if (!(jdbcValue instanceof Number)) {
             return jdbcValue;
@@ -201,4 +281,6 @@ public class JdbcSqlSnapshotSourceFunction extends RichSourceFunction<Row> {
     private String quoteIdentifier(String value) {
         return "\"" + value.replace("\"", "") + "\"";
     }
+
+
 }

@@ -1,28 +1,10 @@
 pipeline-info:
   pipelineId: pipeline-001
   version: 1.0
-#  #                                                  # 目标库建表命名策略，已经作废，命名策略由 客户端 决定，每个客户端可以有不同的命名策略
-#  #  tableNamingStrategy: TABLE_MERGE                # TABLE_MERGE：建表时，使用源表名，同名表合并到一个目标表
-#  #                                                  # TABLE_PREFIX: 建表时，使用源表名，同名冲突时加前缀区分
-#  #                                                  # CLIENTID_SCHEMA_TABLE: 建表时，直接使用：探针ID_用户_表名，全局唯一表名，绝对不会冲突
-#
-#  # 数据同步时，源表删除数据时，目标表的处理策略，
-#  # 目前只实现了DELETE策略，
-#  tableRowDeleteStrategy: DELETE             #  DELETE：源表删除数据，目标表也删除数据
-#                                             #  DELETE_FLAG：源表删除数据，目标表不删除数据，只更新删除标志位。
-#                                             #  慎用DELETE_FLAG，因为可能存在删数据，再插入相同数据，非常影响性能
-#
   ip: 192.168.0.94            # sync-server所在机器的IP地址
-  flinkUiPort: 16000           # flink虚拟集群ui的端口号
-#  snapshotBatchSize: 500       # 关系型数据库：全量快照每批次处理的记录数，默认500，上限也是500，
-#  # 非关系型数据库：全量快照每批次处理的记录数不受此限制，会自动调整
-#  raw-message-storage-strategy: PLAIN        # CDC_LOG_CORRECT表中，kafka原始消息的存储策略
-#    # NONE: 不存储原始消息
-#    # PLAIN: 不压缩，直接插入原始文本
-#  # COMPRESS: 压缩后插入（推荐，节省存储空间）
-#
-#  auto-create-table: true          # 是否自动创建目标表(默认: true)
-#  auto-expand-column-length: false  # 多表合并时是否自动扩充字段长度（默认true）
+  snapshot-flink-ui-port: 17001          # flink虚拟集群ui的端口号1
+  incremental-flink-ui-port: 17002       # flink虚拟集群ui的端口号2
+
 
 server:
   port: 16001

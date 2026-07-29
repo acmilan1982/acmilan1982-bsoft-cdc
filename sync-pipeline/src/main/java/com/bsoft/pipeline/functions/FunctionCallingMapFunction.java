@@ -10,13 +10,15 @@ package com.bsoft.pipeline.functions;
  */
 import com.bsoft.pipeline.plan.runtime.HttpJsonClient;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import org.apache.flink.api.common.functions.MapFunction;
+import org.apache.flink.api.common.functions.RichMapFunction;
+import org.apache.flink.configuration.Configuration;
 import org.apache.flink.types.Row;
 
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+
 
 /**
  * 将输入的 Flink Row 转为 HTTP JSON 请求，调用外部函数后，把响应写回新列 function_result。
@@ -34,7 +36,7 @@ import java.util.Map;
  * - 输出 Row 会保留原 RowKind（INSERT/UPDATE_BEFORE/UPDATE_AFTER/DELETE）。
  * - 输出字段 = 原字段 + function_result（HTTP 返回字符串）。
  */
-public class FunctionCallingMapFunction implements MapFunction<Row, Row> {
+public class FunctionCallingMapFunction extends RichMapFunction<Row, Row> {
 
 
     private static final ObjectMapper MAPPER = new ObjectMapper();
@@ -42,32 +44,49 @@ public class FunctionCallingMapFunction implements MapFunction<Row, Row> {
     private final List<String> inCols;
     private final String httpUrl;
 
+    private transient HttpJsonClient httpClient;
+
     public FunctionCallingMapFunction(List<String> inCols, String httpUrl) {
         this.inCols = new ArrayList<>(inCols);
         this.httpUrl = httpUrl;
     }
 
     @Override
+    public void open(Configuration parameters) {
+        this.httpClient = new HttpJsonClient(
+                200,   // maxTotal
+                50,    // maxPerRoute
+                5000,  // connectTimeoutMs
+                30000, // socketTimeoutMs
+                5000   // connectionRequestTimeoutMs
+        );
+    }
+
+    @Override
     public Row map(Row row) throws Exception {
-        // 1) 组装请求（不把字段强转为 String）
         Map<String, Object> payload = new LinkedHashMap<>();
         payload.put("rowKind", row.getKind().shortString());
 
         Map<String, Object> data = new LinkedHashMap<>();
         for (int i = 0; i < inCols.size(); i++) {
-            data.put(inCols.get(i), row.getField(i)); // 保持原始类型
+            data.put(inCols.get(i), row.getField(i));
         }
         payload.put("data", data);
 
-        // 2) 调外部 HTTP（只做副作用；如果需要可记录 resp）
         String reqBody = MAPPER.writeValueAsString(payload);
-        HttpJsonClient.postJson(httpUrl, reqBody);
+        httpClient.postJson(httpUrl, reqBody);
 
-        // 3) 输出与输入完全同构（字段数/顺序/类型一致）
         Row out = new Row(row.getKind(), row.getArity());
         for (int i = 0; i < row.getArity(); i++) {
-            out.setField(i, row.getField(i)); // 保持原值与类型
+            out.setField(i, row.getField(i));
         }
         return out;
+    }
+
+    @Override
+    public void close() throws Exception {
+        if (httpClient != null) {
+            httpClient.close();
+        }
     }
 }

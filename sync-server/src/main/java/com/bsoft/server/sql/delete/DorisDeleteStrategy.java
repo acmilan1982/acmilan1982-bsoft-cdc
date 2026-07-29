@@ -19,7 +19,7 @@ package com.bsoft.server.sql.delete;
 import com.bsoft.common.bean.KafkaPayload;
 import com.bsoft.common.bean.TargetDataSourceConfig;
 import com.bsoft.common.enums.TableRowDeleteStrategy;
-import com.bsoft.common.log.LogCollector;
+import com.bsoft.common.util.ExceptionDetailUtil;
 import com.bsoft.server.sql.adapter.DatabaseAdapter;
 import com.bsoft.server.sql.doris.http.DorisStreamLoadHelper;
 import com.bsoft.server.sql.factory.DatabaseAdapterFactory;
@@ -135,7 +135,7 @@ public class DorisDeleteStrategy extends AbstractDeleteStrategy {
         } catch (Exception e) {
             result = new StreamLoadResult(
                     false, 0, 0,
-                    "执行异常: " + LogCollector.getSafeStackTraceHead(e, 40, 4000));
+                    "执行异常: " + ExceptionDetailUtil.buildRootCauseDetail(e, 2000));
             throw e;
         } finally {
             boolean success = result.isSuccess();
@@ -232,7 +232,7 @@ public class DorisDeleteStrategy extends AbstractDeleteStrategy {
         } catch (Exception e) {
             result = new StreamLoadResult(
                     false, 0, 0,
-                    "执行异常: " + LogCollector.getSafeStackTraceHead(e, 40, 4000));
+                    "执行异常: " + ExceptionDetailUtil.buildRootCauseDetail(e, 2000));
             throw e;
         } finally {
             boolean success = result.isSuccess();

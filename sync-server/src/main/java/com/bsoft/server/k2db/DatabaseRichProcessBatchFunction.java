@@ -7,21 +7,19 @@ import com.alibaba.druid.sql.dialect.oracle.parser.OracleStatementParser;
 import com.bsoft.common.bean.*;
 import com.bsoft.common.config.properties.ServerInfo;
 import com.bsoft.common.constants.CdcColumnConstants;
-import com.bsoft.common.constants.CdcSqlConstants;
-import com.bsoft.common.dbmeta.OracleColumnsQueryResult;
 import com.bsoft.common.dbmeta.OracleSqlColumnsQueryRequest;
-import com.bsoft.common.dbmeta.SqlResultCreateTableRequest;
 import com.bsoft.common.enums.DatabaseType;
 import com.bsoft.common.enums.DorisTableModel;
 import com.bsoft.common.enums.TableRowDeleteStrategy;
 import com.bsoft.common.enums.TopicSourceKind;
-import com.bsoft.common.log.LogCollector;
 import com.bsoft.common.metric.MonitorMetricEvent;
 import com.bsoft.common.util.DateFormatUtils;
 import com.bsoft.common.util.DateTimeConstants;
+import com.bsoft.common.util.ExceptionDetailUtil;
 import com.bsoft.server.api.SyncClientHTTPClient;
 import com.bsoft.server.batch.BatchInsertItem;
 import com.bsoft.server.batch.BatchSizeManager;
+import com.bsoft.server.offset.TopicOffsetCommitEvent;
 import com.bsoft.server.sql.ddl.DDLStrategy;
 import com.bsoft.server.sql.delete.DeleteStrategy;
 import com.bsoft.server.sql.factory.*;
@@ -122,9 +120,9 @@ public class DatabaseRichProcessBatchFunction extends ProcessFunction<KafkaPaylo
     private SyncClientHTTPClient clientHTTPClient;
 
 
-    // 独立线程定时检查快照缓冲区
-    private transient ScheduledExecutorService snapshotFlushExecutor;
-    private transient ScheduledFuture<?> flushTask;
+//    // 独立线程定时检查快照缓冲区
+//    private transient ScheduledExecutorService snapshotFlushExecutor;
+//    private transient ScheduledFuture<?> flushTask;
     // 快照阶段是否结束的标记
     private volatile boolean snapshotPhaseEnded = false;
 
@@ -141,6 +139,10 @@ public class DatabaseRichProcessBatchFunction extends ProcessFunction<KafkaPaylo
 
     // 日志缓冲队列
     private final Queue<SyncLogEntry> logQueue = new ConcurrentLinkedQueue<>();
+
+
+    // topic offset 提交事件侧输出标签
+    private final OutputTag<TopicOffsetCommitEvent> topicOffsetCommitOutputTag;
 
     private static final ObjectMapper mapper = new ObjectMapper();
 
@@ -167,11 +169,40 @@ public class DatabaseRichProcessBatchFunction extends ProcessFunction<KafkaPaylo
     // PIPELINE_SQL_RESULT + Doris UNIQUE 表时，从目标表读取到的 UNIQUE KEY
     private LinkedHashSet<String> targetUniqueKeySet = new LinkedHashSet<>();
 
+
+    // ===== offset commit 节流参数（先放当前类，后续稳定后再考虑外置）========================================
+
+    // offset commit 最长上报间隔，达到这个时间即使条数不足也发一次
+    private static final long OFFSET_COMMIT_REPORT_INTERVAL_MS = 10_000L;
+
+    // offset commit 累计成功条数阈值，达到这个条数即使时间不足也发一次
+    private static final int OFFSET_COMMIT_REPORT_ROWS = 200;
+
+    // ===== offset commit 运行态字段 =====
+
+    // 当前 topic 最近一次成功推进到的最大 offset
+    private long latestOffsetCommitCandidate = -1L;
+
+    // 上一次已经输出到 offset 侧输出流的最大 offset
+    private long lastReportedOffsetCommitCandidate = -1L;
+//
+//    // 自上次发出 offset commit 事件后累计成功的条数
+//    private int offsetCommitRowsSinceLastReport = 0;
+//
+//    // 上次发出 offset commit 事件的时间戳
+//    private long lastOffsetCommitReportTs = System.currentTimeMillis();
+
+
+
+
+
+
     // 每个DatabaseRichProcessFunction，只写入指定目标库中的指定表(只会写入一个表)
     public DatabaseRichProcessBatchFunction(ServerInfo serverInfo,
                                             ServerTopicInfo serverTopicInfo,
                                             OutputTag<String> syncLogEntryOutputTag,
-                                            OutputTag<String> metricEventOutputTag) {
+                                            OutputTag<String> metricEventOutputTag,
+                                            OutputTag<TopicOffsetCommitEvent> topicOffsetCommitOutputTag) {
 
         this.serverInfo = serverInfo;
         this.serverTopicInfo = serverTopicInfo;
@@ -194,6 +225,10 @@ public class DatabaseRichProcessBatchFunction extends ProcessFunction<KafkaPaylo
 
         this.syncLogEntryOutputTag = syncLogEntryOutputTag;
         this.metricEventOutputTag = metricEventOutputTag;
+
+
+        // offset 提交事件侧输出
+        this.topicOffsetCommitOutputTag = topicOffsetCommitOutputTag;
 
     }
 
@@ -251,20 +286,20 @@ public class DatabaseRichProcessBatchFunction extends ProcessFunction<KafkaPaylo
         // 17. 初始化批次管理器的最后刷新时间
         this.batchSizeManager.setLastFlushTime(System.currentTimeMillis());
 
-        // 18. 启动独立线程定时检查快照缓冲区
-        this.snapshotFlushExecutor = Executors.newSingleThreadScheduledExecutor(r -> {
-            Thread t = new Thread(r, "snapshot-flush-" + tableName);
-            t.setDaemon(true); // 设置为守护线程
-            return t;
-        });
-
-        // 每10秒检查一次
-        this.flushTask = snapshotFlushExecutor.scheduleAtFixedRate(
-                this::checkAndFlushSnapshot,
-                generateRandomInitialDelay(),   // 初始延迟：30-60秒随机
-                30,                             // 固定间隔：30秒
-                TimeUnit.SECONDS
-        );
+//        // 18. 启动独立线程定时检查快照缓冲区
+//        this.snapshotFlushExecutor = Executors.newSingleThreadScheduledExecutor(r -> {
+//            Thread t = new Thread(r, "snapshot-flush-" + tableName);
+//            t.setDaemon(true); // 设置为守护线程
+//            return t;
+//        });
+//
+//        // 每10秒检查一次
+//        this.flushTask = snapshotFlushExecutor.scheduleAtFixedRate(
+//                this::checkAndFlushSnapshot,
+//                generateRandomInitialDelay(),   // 初始延迟：30-60秒随机
+//                30,                             // 固定间隔：30秒
+//                TimeUnit.SECONDS
+//        );
 
 
 
@@ -436,61 +471,61 @@ public class DatabaseRichProcessBatchFunction extends ProcessFunction<KafkaPaylo
     }
 
 
-    /**
-     * 定时检查并刷新快照缓冲区
-     * 执行顺序按照发生频率排序：最高频的检查放在最前面
-     */
-    private void checkAndFlushSnapshot() {
-        try {
-            // 1.没有超过最大时间间隔，不做任何处理（最高频场景，无需加锁的快速检查）
-            // 快照阶段可能持续几个小时，定时任务会执行几百次，大部分情况下时间未到直接返回
-            if(!isFlushTimeoutExceeded()){
-                return;
-            }
+//    /**
+//     * 定时检查并刷新快照缓冲区
+//     * 执行顺序按照发生频率排序：最高频的检查放在最前面
+//     */
+//    private void checkAndFlushSnapshot() {
+//        try {
+//            // 1.没有超过最大时间间隔，不做任何处理（最高频场景，无需加锁的快速检查）
+//            // 快照阶段可能持续几个小时，定时任务会执行几百次，大部分情况下时间未到直接返回
+//            if(!isFlushTimeoutExceeded()){
+//                return;
+//            }
+//
+//
+//            // 2.超时了，刷新快照缓冲区（中频场景，只在超时时执行）
+//            // 只在这里加锁，减少锁竞争
+//            synchronized (this) {
+//                if (!snapshotBuffer.isEmpty()) {
+//                    // 刷新快照缓冲区并更新时间戳
+//                    flushSnapshotBuffer();
+//                }
+//            }
+//
+//            // 3.快照完成后，停止刷新线程（最低频场景，只在快照结束后发生一次）
+//            if (snapshotPhaseEnded) {
+//                logger.info("✅ 快照阶段已结束,停止刷新线程: 表={}", tableName);
+//                shutdownFlushExecutor();
+//            }
+//
+//
+//        } catch (Exception e) {
+//            e.printStackTrace();
+//            logger.error("❌ 定时刷新快照失败: 表={}", tableName, e);
+//        }
+//    }
 
-
-            // 2.超时了，刷新快照缓冲区（中频场景，只在超时时执行）
-            // 只在这里加锁，减少锁竞争
-            synchronized (this) {
-                if (!snapshotBuffer.isEmpty()) {
-                    // 刷新快照缓冲区并更新时间戳
-                    flushSnapshotBuffer();
-                }
-            }
-
-            // 3.快照完成后，停止刷新线程（最低频场景，只在快照结束后发生一次）
-            if (snapshotPhaseEnded) {
-                logger.info("✅ 快照阶段已结束,停止刷新线程: 表={}", tableName);
-                shutdownFlushExecutor();
-            }
-
-
-        } catch (Exception e) {
-            e.printStackTrace();
-            logger.error("❌ 定时刷新快照失败: 表={}", tableName, e);
-        }
-    }
-
-    // 停止线程，关闭线程池
-    private void shutdownFlushExecutor() {
-        // 1. 先取消定时任务
-        if (flushTask != null && !flushTask.isCancelled()) {
-            flushTask.cancel(false); // 不中断正在执行的任务
-        }
-
-        // 2. 再关闭线程池
-        if (snapshotFlushExecutor != null && !snapshotFlushExecutor.isShutdown()) {
-            snapshotFlushExecutor.shutdown();
-            try {
-                if (!snapshotFlushExecutor.awaitTermination(5, TimeUnit.SECONDS)) {
-                    snapshotFlushExecutor.shutdownNow();
-                }
-            } catch (InterruptedException e) {
-                snapshotFlushExecutor.shutdownNow();
-                Thread.currentThread().interrupt();
-            }
-        }
-    }
+//    // 停止线程，关闭线程池
+//    private void shutdownFlushExecutor() {
+//        // 1. 先取消定时任务
+//        if (flushTask != null && !flushTask.isCancelled()) {
+//            flushTask.cancel(false); // 不中断正在执行的任务
+//        }
+//
+//        // 2. 再关闭线程池
+//        if (snapshotFlushExecutor != null && !snapshotFlushExecutor.isShutdown()) {
+//            snapshotFlushExecutor.shutdown();
+//            try {
+//                if (!snapshotFlushExecutor.awaitTermination(5, TimeUnit.SECONDS)) {
+//                    snapshotFlushExecutor.shutdownNow();
+//                }
+//            } catch (InterruptedException e) {
+//                snapshotFlushExecutor.shutdownNow();
+//                Thread.currentThread().interrupt();
+//            }
+//        }
+//    }
 
 //    /**
 //     * 检查目标表是否存在
@@ -551,7 +586,7 @@ public class DatabaseRichProcessBatchFunction extends ProcessFunction<KafkaPaylo
                     handleSnapshotData(row);
                 }
             } else {
-                // ✅ 遇到第一条非快照数据,标记快照阶段结束
+                //  遇到第一条非快照数据,标记快照阶段结束
                 if (!snapshotPhaseEnded) {
                     snapshotPhaseEnded = true;
                     logger.info("🏁 快照阶段结束标记已设置: 表={}", tableName);
@@ -600,13 +635,13 @@ public class DatabaseRichProcessBatchFunction extends ProcessFunction<KafkaPaylo
 //            }
 
             // monitorOffset 近似上报
-            if (result.isSuccess() && row.getOffset() != null) {
-                OffsetPhase phase = snapshotPhaseEnded ? OffsetPhase.REALTIME : OffsetPhase.SNAPSHOT;
-                MonitorMetricEvent monitorMetricEvent = buildMonitorOffsetEventIfDue(row.getOffset(), phase);
-                if(monitorMetricEvent != null){
-                    ctx.output(metricEventOutputTag, mapper.writeValueAsString(monitorMetricEvent));
-                }
-            }
+//            if (result.isSuccess() && row.getOffset() != null) {
+//                OffsetPhase phase = snapshotPhaseEnded ? OffsetPhase.REALTIME : OffsetPhase.SNAPSHOT;
+//                MonitorMetricEvent monitorMetricEvent = buildMonitorOffsetEventIfDue(row.getOffset(), phase);
+//                if(monitorMetricEvent != null){
+//                    ctx.output(metricEventOutputTag, mapper.writeValueAsString(monitorMetricEvent));
+//                }
+//            }
 
             // 日志输出到侧输出流
             SyncLogEntry logEntry;
@@ -614,6 +649,12 @@ public class DatabaseRichProcessBatchFunction extends ProcessFunction<KafkaPaylo
                 ctx.output(syncLogEntryOutputTag, mapper.writeValueAsString(logEntry));
             }
 
+
+            // topic offset commit 事件按节流策略输出到侧输出流
+            TopicOffsetCommitEvent offsetCommitEvent = buildOffsetCommitEventIfDue();
+            if (offsetCommitEvent != null) {
+                ctx.output(topicOffsetCommitOutputTag, offsetCommitEvent);
+            }
 
             // 输出结果供下游统计使用
             out.collect(result);
@@ -646,7 +687,7 @@ public class DatabaseRichProcessBatchFunction extends ProcessFunction<KafkaPaylo
         int currentBatchSize = batchSizeManager.getCurrentBatchSize();
 
         // 2.如果 缓存数量 达到批次大小 或者 超过最大时间，马上进行批量处理，否则继续缓存
-        if (snapshotBuffer.size() >= currentBatchSize  || isFlushTimeoutExceeded()) {
+        if ((snapshotBuffer.size() >= currentBatchSize  || isFlushTimeoutExceeded()) || row.lastRecordInTable()) {
 
             // 刷新快照缓冲区并更新时间戳
             flushSnapshotBuffer();
@@ -810,6 +851,9 @@ public class DatabaseRichProcessBatchFunction extends ProcessFunction<KafkaPaylo
 
         }
 
+        // 当前阶段默认整批处理结束后即可推进 offset 候选进度
+        advanceLatestOffsetCommitCandidateByBatch(batchItems);
+
     }
 
 
@@ -933,6 +977,8 @@ public class DatabaseRichProcessBatchFunction extends ProcessFunction<KafkaPaylo
             default:
                 logger.warn("⚠️ Unknown operation type: {} skipped", op);
         }
+
+        advanceLatestOffsetCommitCandidate(row.getOffset());
     }
 
     public void invokeInsert(KafkaPayload row)  {
@@ -944,7 +990,7 @@ public class DatabaseRichProcessBatchFunction extends ProcessFunction<KafkaPaylo
         } catch (Exception e) {
             e.printStackTrace();
             success = false;
-            logDetail = LogCollector.getSafeStackTraceHead(e, 40, 4000);
+            logDetail = ExceptionDetailUtil.buildRootCauseDetail(e, 2000);
         } finally {
             log(row, success, logDetail);
         }
@@ -972,7 +1018,7 @@ public class DatabaseRichProcessBatchFunction extends ProcessFunction<KafkaPaylo
             this.updateStrategy.executeUpdate(tableName, row);
         } catch (Exception e) {
             success = false;
-            logDetail = LogCollector.getSafeStackTraceHead(e, 40, 4000);
+            logDetail = ExceptionDetailUtil.buildRootCauseDetail(e, 2000);
         } finally {
             log(row, success, logDetail);
         }
@@ -1005,7 +1051,7 @@ public class DatabaseRichProcessBatchFunction extends ProcessFunction<KafkaPaylo
         } catch (Exception e) {
             e.printStackTrace();
             success = false;
-            logDetail = LogCollector.getSafeStackTraceHead(e, 40, 4000);
+            logDetail = ExceptionDetailUtil.buildRootCauseDetail(e, 2000);
         } finally {
             log(row, success, logDetail);
         }
@@ -1235,7 +1281,7 @@ public class DatabaseRichProcessBatchFunction extends ProcessFunction<KafkaPaylo
 //        this.logCollector = null;
 
         // 2. 停止定时任务
-        shutdownFlushExecutor();
+//        shutdownFlushExecutor();
 
     }
 
@@ -1327,6 +1373,7 @@ public class DatabaseRichProcessBatchFunction extends ProcessFunction<KafkaPaylo
     }
 
 
+
     private MonitorMetricEvent buildOffsetMetricEvent(long offset) {
         MonitorMetricEvent event = MonitorMetricEvent.offsetEvent(
                 this.serverInfo.getServerId(),
@@ -1339,6 +1386,71 @@ public class DatabaseRichProcessBatchFunction extends ProcessFunction<KafkaPaylo
         return event;
     }
 
+
+
+
+
+    private TopicOffsetCommitEvent buildOffsetCommitEventIfDue() {
+        // 还没有任何已持久化成功的 offset 时，不输出事件
+        if (latestOffsetCommitCandidate < 0L) {
+            return null;
+        }
+
+        // 如果候选进度没有比上次已输出进度更大，则不重复输出
+        if (latestOffsetCommitCandidate <= lastReportedOffsetCommitCandidate) {
+            return null;
+        }
+//
+//        // 计算当前时间
+//        long now = System.currentTimeMillis();
+//
+//        // 时间到阈值则触发一次
+//        boolean hitTime = (now - lastOffsetCommitReportTs) >= OFFSET_COMMIT_REPORT_INTERVAL_MS;
+//
+//        // 成功条数到阈值则触发一次
+//        boolean hitRows = offsetCommitRowsSinceLastReport >= OFFSET_COMMIT_REPORT_ROWS;
+//
+//        // 任一条件满足都触发
+//        if (hitTime || hitRows) {
+//            // 更新最近一次发出时间
+//            lastOffsetCommitReportTs = now;
+//
+//            // 清空本轮计数，开始下一轮累计
+//            offsetCommitRowsSinceLastReport = 0;
+//
+//            // 记录本次已输出到侧输出流的最大 offset
+//            lastReportedOffsetCommitCandidate = latestOffsetCommitCandidate;
+//
+//            // 保存的是 nextOffset，因此需要 +1
+//            long nextOffset = latestOffsetCommitCandidate + 1L;
+//
+//            // 构造 offset commit 事件
+//            return TopicOffsetCommitEvent.of(
+//                    this.serverInfo.getServerId(),
+//                    this.serverTopicInfo.getTopic(),
+//                    nextOffset
+//            );
+//        }
+
+        // 记录本次已输出到侧输出流的最大 offset
+        lastReportedOffsetCommitCandidate = latestOffsetCommitCandidate;
+
+        // 保存的是 nextOffset，因此需要 +1
+        long nextOffset = latestOffsetCommitCandidate + 1L;
+
+        // 构造 offset commit 事件
+        return TopicOffsetCommitEvent.of(
+                this.serverInfo.getServerId(),
+                this.serverTopicInfo.getTopic(),
+                nextOffset
+        );
+
+
+//
+//
+//        // 未达到触发条件则不发事件
+//        return null;
+    }
     // PIPELINE_SQL_RESULT + Doris UNIQUE 表时，从目标表读取到的 UNIQUE KEY
     private void initPipelineSqlResultTargetUniqueKeys() throws Exception {
         TopicSourceKind sourceKind = resolveSourceKind();
@@ -1519,4 +1631,57 @@ public class DatabaseRichProcessBatchFunction extends ProcessFunction<KafkaPaylo
                 && this.targetDataSourceConfig.getDataSourceType() == DatabaseType.DORIS;
     }
 
+
+
+
+
+
+
+
+
+
+    private synchronized void advanceLatestOffsetCommitCandidate(Long rowOffset) {
+        // 空 offset 不参与推进
+        if (rowOffset == null) {
+            return;
+        }
+
+        // 推进当前 topic 已确认完成持久化的最大 offset
+        latestOffsetCommitCandidate = Math.max(latestOffsetCommitCandidate, rowOffset);
+
+//        // 成功条数加一，用于后续节流判断
+//        offsetCommitRowsSinceLastReport++;
+    }
+
+    private synchronized void advanceLatestOffsetCommitCandidateByBatch(List<BatchInsertItem> batchItems) {
+        // 批量列表为空则直接返回
+        if (batchItems == null || batchItems.isEmpty()) {
+            return;
+        }
+
+        long maxOffset = -1L;
+        int successCount = 0;
+
+        // 当前阶段默认整批处理完成后即可推进 offset
+        for (BatchInsertItem item : batchItems) {
+            KafkaPayload payload = item.getPayload();
+            if (payload == null || payload.getOffset() == null) {
+                continue;
+            }
+
+            maxOffset = Math.max(maxOffset, payload.getOffset());
+            successCount++;
+        }
+
+        // 没有有效 offset 时不推进
+        if (successCount == 0) {
+            return;
+        }
+
+        // 批量推进当前 topic 已确认完成持久化的最大 offset
+        latestOffsetCommitCandidate = Math.max(latestOffsetCommitCandidate, maxOffset);
+
+//        // 成功条数累加，用于后续节流判断
+//        offsetCommitRowsSinceLastReport += successCount;
+    }
 }

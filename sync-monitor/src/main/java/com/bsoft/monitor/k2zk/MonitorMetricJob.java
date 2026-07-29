@@ -65,7 +65,7 @@ public class MonitorMetricJob extends CDCJob {
 
 
     public void init() throws Exception {
-        this.globalZooKeeperManager = GlobalZooKeeperManager.getInstance(this.monitorServerInfo);
+//        this.globalZooKeeperManager = GlobalZooKeeperManager.getInstance(this.monitorServerInfo);
     }
 
     public void startJob() throws Exception {
@@ -171,8 +171,8 @@ public class MonitorMetricJob extends CDCJob {
             metric.put(MetricKeys.TARGET_TABLE_NAME, serverTopicInfo.getTargetTableName());
             metric.put(MetricKeys.UNCONSUMED_MESSAGE_COUNT, String.valueOf(currentLag));
 
-            globalZooKeeperManager.updateUnconsumedMessageCount(metric);
-            globalZooKeeperManager.flushLagMetrics();
+//            globalZooKeeperManager.updateUnconsumedMessageCount(metric);
+//            globalZooKeeperManager.flushLagMetrics();
 
             logger.info("Lag changed, update zk. topic={}, targetDs={}, table={}, oldLag={}, newLag={}",
                     topic,

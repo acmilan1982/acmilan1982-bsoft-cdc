@@ -90,15 +90,15 @@ public class ClientTopicInfo implements Serializable {
         return clientInfo == null ? null : clientInfo.getClientId();
     }
 
-    public TableNamingStrategy getTableNamingStrategy() {
-        return clientInfo == null ? null : clientInfo.getTableNamingStrategy();
-    }
-
-    public String getTableNamePrefix() {
-        return clientInfo == null ? null : clientInfo.getTableNamePrefix();
-    }
-
-    public String getTableNameSuffix() {
-        return clientInfo == null ? null : clientInfo.getTableNameSuffix();
-    }
+//    public TableNamingStrategy getTableNamingStrategy() {
+//        return clientInfo == null ? null : clientInfo.getTableNamingStrategy();
+//    }
+//
+//    public String getTableNamePrefix() {
+//        return clientInfo == null ? null : clientInfo.getTableNamePrefix();
+//    }
+//
+//    public String getTableNameSuffix() {
+//        return clientInfo == null ? null : clientInfo.getTableNameSuffix();
+//    }
 }

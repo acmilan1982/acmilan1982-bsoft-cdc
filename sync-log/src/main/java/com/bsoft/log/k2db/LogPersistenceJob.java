@@ -2,47 +2,45 @@ package com.bsoft.log.k2db;
 
 
 import com.bsoft.common.bean.*;
+import com.bsoft.common.config.properties.LogInfo;
 import com.bsoft.common.core.CDCJob;
-import com.bsoft.common.enums.JobStatus;
-import com.bsoft.common.enums.WindowTimeUnit;
-import com.bsoft.common.global.GlobalLogCollectorManager;
-import com.bsoft.common.global.GlobalZooKeeperManager;
+
 import com.bsoft.common.util.DatasourceConfigFetcher;
 import com.bsoft.common.util.JobIdUtil;
 import com.bsoft.common.util.KafkaUtils;
 
+
+import com.bsoft.log.global.GlobalLogCollectorManager;
+import com.bsoft.log.offset.JdbcLogTopicOffsetRepository;
+import com.bsoft.log.offset.LogTopicOffsetRepository;
 import org.apache.flink.api.common.eventtime.WatermarkStrategy;
-import org.apache.flink.api.common.serialization.SimpleStringSchema;
+
 import org.apache.flink.configuration.Configuration;
 import org.apache.flink.configuration.RestOptions;
-import org.apache.flink.connector.base.DeliveryGuarantee;
-import org.apache.flink.connector.kafka.sink.KafkaRecordSerializationSchema;
-import org.apache.flink.connector.kafka.sink.KafkaSink;
+
 import org.apache.flink.connector.kafka.source.KafkaSource;
 import org.apache.flink.connector.kafka.source.enumerator.initializer.OffsetsInitializer;
-import org.apache.flink.core.fs.Path;
-import org.apache.flink.runtime.state.hashmap.HashMapStateBackend;
-import org.apache.flink.streaming.api.CheckpointingMode;
-import org.apache.flink.streaming.api.datastream.DataStream;
+
 import org.apache.flink.streaming.api.datastream.DataStreamSource;
 import org.apache.flink.streaming.api.datastream.SingleOutputStreamOperator;
-import org.apache.flink.streaming.api.environment.CheckpointConfig;
+
 import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
-import org.apache.flink.streaming.api.windowing.assigners.SlidingProcessingTimeWindows;
-import org.apache.flink.streaming.api.windowing.time.Time;
+
 import org.apache.flink.util.OutputTag;
+import org.apache.kafka.clients.consumer.OffsetResetStrategy;
+import org.apache.kafka.common.TopicPartition;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.scheduling.annotation.EnableScheduling;
-import org.springframework.scheduling.annotation.Scheduled;
+
 import org.springframework.stereotype.Component;
 
-import java.io.File;
+
 import java.io.IOException;
-import java.time.Duration;
+
 import java.util.*;
-import java.util.stream.Collectors;
+
 
 
 // 注册为 Spring 管理的组件
@@ -54,36 +52,48 @@ public class LogPersistenceJob extends CDCJob {
     private static final Logger logger = LogManager.getLogger(LogPersistenceJob.class);
 
 
+    @Autowired
+    private LogInfo logInfo;
 
+
+    // 配置库读取工具
+    @Autowired
+    private DatasourceConfigFetcher configFetcher;
 
     // kafka工具类
     @Autowired
     private KafkaUtils kafkaUtils;
 
 
-    // 检查点相关
-    @Autowired
-    private StateBackendProperties stateBackendProperties;
 
 
-    private final String serverLogTopic = "cdc.sync.server.logs.v1";
+    // topic offset 仓储，负责配置库中的位点读写
+    private LogTopicOffsetRepository logTopicOffsetRepository;
 
-//    @Autowired
-//    private ClientHTTPClient clientHTTPClient;
+
 
 
     public void init() throws Exception {
-//        this.globalZooKeeperManager = GlobalZooKeeperManager.getInstance(this.serverInfo);
-//        this.serverlogTopic = "server_logs_" + this.serverInfo.getServerId();
+//        // 初始化 server 进程级 zk 服务
+//        this.serverProcessZkService = ServerProcessZkService.open(this.serverInfo);
+
+        // 初始化 topic offset 仓储，复用配置库 DataSource
+        this.logTopicOffsetRepository = new JdbcLogTopicOffsetRepository(
+                this.configFetcher.getConfigDataSource()
+
+        );
     }
 
     public void startJob() {
         try {
 
-            // 4.根据配置库的内容，初始化当前执行所需的环境
+            // 1.从配置库读取各种配置
+            prepareForJobExecution();
+
+            // 2.根据配置库的内容，初始化当前执行所需的环境
             initLogServerExecutionEnvironment();
 
-            // 5.是从 kafka 读取数据，写入目标库，可同时写入多个目标库
+            // 3.是从 kafka 读取数据，写入目标库，可同时写入多个目标库
             pullFromKafkaAndPublishToDB();
 
         } catch (Exception e) {
@@ -94,23 +104,110 @@ public class LogPersistenceJob extends CDCJob {
 
 
 
+
+    /**
+     * 从配置库读取 sync-log 运行所需配置。
+     */
+    public void prepareForJobExecution() throws Exception {
+        // 从 CDC_SERVER_CONFIG 读取日志 topic 配置。
+        initLogTopicFromConfig();
+
+        // 从 CDC_SERVER_CONFIG 读取原始消息存储策略配置。
+        initRawMessageStorageStrategyFromConfig();
+
+        // 校验 logId 不能为空。
+        validateLogInfo();
+    }
+
+    /**
+     * 从 CDC_SERVER_CONFIG 初始化日志 topic。
+     */
+    private void initLogTopicFromConfig() throws Exception {
+        // 读取服务端写入日志使用的 Kafka topic。
+        String logTopic = configFetcher.loadServerConfigValue("server-log-topic-name");
+
+        // 配置库中存在有效日志 topic 时，覆盖 application.yml 中的默认值。
+        if (logTopic != null && !logTopic.trim().isEmpty()) {
+            // 去除首尾空白后写入 LogInfo。
+            this.logInfo.setLogTopic(logTopic.trim());
+        }
+    }
+
+    /**
+     * 从 CDC_SERVER_CONFIG 初始化原始消息存储策略。
+     */
+    private void initRawMessageStorageStrategyFromConfig() throws Exception {
+        // 读取 CDC_LOG_CORRECT 表中 raw_message 字段的存储策略。
+        String rawMessageStorageStrategyValue =
+                configFetcher.loadServerConfigValue("raw-message-storage-strategy");
+
+        // 配置库未配置时保留 LogInfo 中的默认值。
+        if (rawMessageStorageStrategyValue == null || rawMessageStorageStrategyValue.trim().isEmpty()) {
+            return;
+        }
+
+        // 标准化配置值，兼容数据库中小写或混合大小写。
+        String normalizedValue = rawMessageStorageStrategyValue.trim().toUpperCase();
+
+        try {
+            // 将配置值转换为枚举。
+            RawMessageStorageStrategy strategy = RawMessageStorageStrategy.valueOf(normalizedValue);
+
+            // 写入 LogInfo，后续创建 LogCollector 时使用该策略。
+            this.logInfo.setRawMessageStorageStrategy(strategy);
+        } catch (IllegalArgumentException e) {
+            // 配置值非法时直接启动失败，避免 raw_message 存储行为不明确。
+            throw new IllegalStateException(
+                    "invalid raw-message-storage-strategy: " + rawMessageStorageStrategyValue
+                            + ", supported values: NONE, PLAIN, COMPRESS",
+                    e
+            );
+        }
+    }
+
+    /**
+     * 校验 sync-log 基础配置。
+     */
+    private void validateLogInfo() {
+        // 校验 logId 不能为空，因为它是 CDC_LOG_TOPIC_OFFSET 的主键维度。
+        if (this.logInfo.getLogId() == null || this.logInfo.getLogId().trim().isEmpty()) {
+            throw new IllegalStateException("logInfo.logId is blank");
+        }
+
+        // 校验日志 topic 不能为空，因为它是 KafkaSource 的消费目标。
+        if (this.logInfo.getLogTopic() == null || this.logInfo.getLogTopic().trim().isEmpty()) {
+            throw new IllegalStateException("logInfo.logTopic is blank");
+        }
+
+        // 校验 rawMessageStorageStrategy 不能为空，避免 LogCollector 处理 raw_message 时出现空策略。
+        if (this.logInfo.getRawMessageStorageStrategy() == null) {
+            throw new IllegalStateException("logInfo.rawMessageStorageStrategy is null");
+        }
+    }
+
+
+
     // 根据配置库的内容，初始化当前执行所需的环境
     public void initLogServerExecutionEnvironment() throws Exception {
 
-        kafkaUtils.waitUntilTopicExists(this.serverLogTopic);
+        kafkaUtils.waitUntilTopicExists(this.logInfo.getLogTopic());
 
         // 6. 设置一个启动时间
-        this.logServerInfo.notifyClientStart();
+        this.logInfo.notifyClientStart();
 
-        logger.info("当前 job 启动,启动时间: {}", this.logServerInfo.printStartTime());
+        logger.info("当前 job 启动,启动时间: {}", this.logInfo.printStartTime());
     }
 
 
     public void pullFromKafkaAndPublishToDB() throws Exception {
-        // 获取客户端id，为了生成固定的job id
-        String serverId = this.logServerInfo.getLogServerId();
+        // 获取 log id，为了生成固定的job id
+        String logId = this.logInfo.getLogId();
+
+        // 获取日志 topic。
+        String logTopic = this.logInfo.getLogTopic();
+
         // 生成固定的 job id
-        String jobIdHex = JobIdUtil.generateFixedJobId(serverId);
+        String jobIdHex = JobIdUtil.generateFixedJobId(logId);
 
         // 创建 执行环境 的 Configuration
         Configuration configuration = new Configuration();
@@ -120,55 +217,49 @@ public class LogPersistenceJob extends CDCJob {
         configureNetworkBufferPool(configuration);
 
 
-        // 检查点设置
-        String latestCheckpointPathWithMetadata = findLatestCheckpointPathWithMetadata(
-                stateBackendProperties.getCheckpointPath(), jobIdHex);
-        if (latestCheckpointPathWithMetadata != null) {
-            configuration.setString("execution.savepoint.path", latestCheckpointPathWithMetadata);
-            logger.info("从检查点恢复: {}", latestCheckpointPathWithMetadata);
-        } else {
-            logger.info(" 没有找到检查点，将从头开始");
-        }
-
 
         // 为避免默认 8081 被占用，使用配置文件中指定的端口
-        configuration.setInteger(RestOptions.PORT, serverInfo.getFlinkUiPort());
+        configuration.setInteger(RestOptions.PORT, this.logInfo.getFlinkUiPort());
         StreamExecutionEnvironment env = StreamExecutionEnvironment.createLocalEnvironmentWithWebUI(configuration);
 
-        // 应用检查点
-        configureCheckpointing(env);
 
+        // 从 CDC_LOG_TOPIC_OFFSET 读取日志 topic 的 nextOffset。
+        Map<String, Long> persistedOffsets = loadPersistedLogTopicOffsets(logId, logTopic);
 
-        // 定义侧输出标签，用于输入日志
-        OutputTag<String> syncLogEntryOutputTag = new OutputTag<String>("sync-server-log-side-output") {};
+        // 根据 Kafka 当前 earliest offset 修正初始或已过期的持久化 offset
+        Map<String, Long> correctedOffsets = correctPersistedOffsetsByKafkaEarliest(logId, logTopic, persistedOffsets);
+
+        // 使用修正后的 offset 构造 KafkaSource 起始位置
+        OffsetsInitializer startingOffsetsInitializer = buildStartingOffsetsInitializer(logTopic, correctedOffsets);
+
 
 
 
 
 
             // 稳定 groupId：serverId + topic，便于断点续读
-            String groupId = "flink-k2db-" + serverInfo.getServerId() + "-" + this.serverLogTopic;
+            String groupId = "flink-k2db-" + this.logInfo.getLogId();
 
             // TODO 从Kafka读(消费者角色)： 新Source架构
-            KafkaSource<String> kafkaSource = KafkaSource.<String>builder()
+            KafkaSource<LogKafkaMessage> kafkaSource = KafkaSource.<LogKafkaMessage>builder()
                     .setBootstrapServers(kafkaUtils.getKafkaBootstrapServers())   // 指定kafka节点的地址和端口
-                    .setGroupId(groupId)  // 指定消费者组的id
-                    .setTopics(this.serverLogTopic)                        // 指定消费的 Topic
-                    .setDeserializer(new KafkaMessageDeserializer())    // 指定 反序列化器，这个是反序列化value
-                    .setStartingOffsets(OffsetsInitializer.earliest())                                 // flink消费kafka的策略
-                    .build();
+                    .setGroupId(groupId)                                          // 指定消费者组的id
+                    .setTopics(logTopic)                                          // 指定消费的 Topic
+                    .setDeserializer(new KafkaMessageDeserializer())     // 指定 反序列化器，这个是反序列化value
+                    .setStartingOffsets(startingOffsetsInitializer)   // 设置从 CDC_LOG_TOPIC_OFFSET 读取到的启动 offset。
+                    .build();                                            // 构建 KafkaSource。
 
 
             // 创建数据流
-            DataStreamSource<String> kafkaDataStream = env.fromSource(
+            DataStreamSource<LogKafkaMessage> kafkaDataStream = env.fromSource(
                     kafkaSource,
                     WatermarkStrategy.noWatermarks(),
-                    "kafka-source-" + this.serverLogTopic);
+                    "kafka-source-" + logTopic);
 
             // 解析Kafka消息并处理数据库写入，获得操作结果
             SingleOutputStreamOperator<Void> operationResults = kafkaDataStream
-                    .map(KafkaMessageConverter::parseKafkaMessage)
-                    .name("parse-kafka-message-" + this.serverLogTopic)
+
+                    .name("parse-kafka-message-" + this.logInfo.getLogTopic())
                     .filter(kafkaPayload -> {
                         boolean isValid = kafkaPayload != null;
                         if (!isValid) {
@@ -176,11 +267,24 @@ public class LogPersistenceJob extends CDCJob {
                         }
                         return isValid;
                     })
-                    .name("filter-" + this.serverLogTopic).uid("filter-" + this.serverLogTopic)
-                    .process(new DatabaseBatchWriteFunction(this.logServerInfo)) // 使用ProcessFunction处理写入
-                    .name("target-writer-" + this.serverLogTopic).uid("target-writer-" + this.serverLogTopic);
+                    .name("filter-" + logTopic)
+                    // 设置过滤算子 uid。
+                    .uid("filter-" + logTopic)
+                    .process(new DatabaseBatchWriteFunction(this.logInfo)) // 使用ProcessFunction处理写入
+                    // 设置写入算子名称。
+                    .name("target-writer-" + logTopic)
+                    // 设置写入算子 uid。
+                    .uid("target-writer-" + logTopic);
 
 
+        // 注册 JVM 关闭钩子，关闭异步日志写入器。
+        Runtime.getRuntime().addShutdownHook(new Thread(() -> {
+            // 打印关闭日志。
+            logger.info("sync-log shutting down, flushing log collector");
+
+            // 关闭所有 LogCollector。
+            GlobalLogCollectorManager.shutdownAll();
+        }));
 
 
         env.execute("Kafka ➔ MySQL Dynamic Sync");
@@ -200,86 +304,142 @@ public class LogPersistenceJob extends CDCJob {
     }
 
 
+    /**
+     * 从 CDC_LOG_TOPIC_OFFSET 读取当前日志 topic 的 nextOffset。
+     */
+    private Map<String, Long> loadPersistedLogTopicOffsets(String logId, String logTopic) throws Exception {
+        // 调用仓储读取 offset；如果缺失，仓储负责初始化 nextOffset=0。
+        Map<String, Long> persistedOffsets = logTopicOffsetRepository.loadNextOffsets(
+                logId,
+                Collections.singletonList(logTopic)
+        );
+
+        // 防御仓储返回 null。
+        if (persistedOffsets == null) {
+            // 使用空 Map 避免后续空指针。
+            persistedOffsets = Collections.emptyMap();
+        }
+
+        // 打印读取到的 offset 信息。
+        logger.info("从CDC_LOG_TOPIC_OFFSET表，加载日志的偏移量, logId={}, topic={}, topicCount={}",
+                logId, logTopic, persistedOffsets.size());
+
+        // 返回 topic -> nextOffset。
+        return persistedOffsets;
+    }
 
     /**
-     * 配置检查点
-     * @param env Flink流执行环境
-     * @throws IOException
+     * 根据 CDC_LOG_TOPIC_OFFSET 中的 nextOffset 构造 KafkaSource 起始位点。
      */
-    public void configureCheckpointing(StreamExecutionEnvironment env) throws IOException {
-        logger.info("⚙️ 配置检查点...");
+    private OffsetsInitializer buildStartingOffsetsInitializer(String logTopic,
+                                                               Map<String, Long> persistedOffsets) {
+        // 标准化 topic。
+        String normalizedTopic = normalizeText(logTopic);
 
-        // TODO 检查点常用配置
-        // 1、启用检查点: 默认是barrier对齐的，周期为10分钟, 精准一次
-        env.enableCheckpointing( 3 * 60 * 60 * 1000L, CheckpointingMode.EXACTLY_ONCE);
+        // 校验 topic 不能为空。
+        if (normalizedTopic.isEmpty()) {
+            // topic 为空时无法构造 KafkaSource 起始位点。
+            throw new IllegalArgumentException("logTopic is blank");
+        }
 
-        // 检查点的配置对象
-        CheckpointConfig checkpointConfig = env.getCheckpointConfig();
+        // 防御 offset map 为空。
+        Map<String, Long> safePersistedOffsets = persistedOffsets == null ? Collections.emptyMap() : persistedOffsets;
 
-        // 2、指定检查点的存储位置
-        // 2、指定检查点的存储位置
-        env.setStateBackend(new HashMapStateBackend());
-        env.getCheckpointConfig().setCheckpointStorage(stateBackendProperties.getCheckpointPath());
+        // 读取当前 topic 的 nextOffset。
+        Long nextOffset = safePersistedOffsets.get(normalizedTopic);
 
-        // 3、checkpoint的超时时间: 默认30分钟，超过这个时间，认为当前checkpoint保存失败
-        checkpointConfig.setCheckpointTimeout(1 * 60 * 60 * 1000L);
+        // 如果没有 offset 或 offset 为 0，则从 topic 头开始读取。
+        if (nextOffset == null || nextOffset == 0L) {
+            // 记录从头消费。
+            logger.info("sync-log starts from topic head, topic={}, nextOffset={}", normalizedTopic, nextOffset);
 
-        // 4、同时运行中的checkpoint的最大数量
-        checkpointConfig.setMaxConcurrentCheckpoints(1);
+            // 从 Kafka topic 最早可用位置开始读取。
+            return OffsetsInitializer.earliest();
+        }
 
-        // 5、最小等待间隔: 上一轮checkpoint结束 到 下一轮checkpoint开始 之间的间隔，如果设置了 > 0，那么并发就会变成1
-        checkpointConfig.setMinPauseBetweenCheckpoints(5 * 60 * 1000L);
+        // 校验 offset 不能为负数。
+        if (nextOffset < 0L) {
+            // 持久化 offset 异常时直接失败，避免错误消费。
+            throw new IllegalStateException("persisted nextOffset cannot be negative, topic=" + normalizedTopic);
+        }
 
-        // 6、取消作业时，checkpoint的数据 是否保留在外部系统
-        // DELETE_ON_CANCELLATION:主动cancel时，删除存在外部系统的chk-xx目录 （如果是程序突然挂掉，不会删）
-        // RETAIN_ON_CANCELLATION:主动cancel时，外部系统的chk-xx目录会保存下来
-        checkpointConfig.setExternalizedCheckpointCleanup(CheckpointConfig.ExternalizedCheckpointCleanup.RETAIN_ON_CANCELLATION);
+        // 当前日志 topic 有且仅有一个分区，固定使用 0 号分区。
+        TopicPartition topicPartition = new TopicPartition(normalizedTopic, 0);
 
-        // 7、允许 checkpoint 连续失败的次数，默认0--》表示checkpoint一失败，job就挂掉
-        checkpointConfig.setTolerableCheckpointFailureNumber(100);
+        // 构造 partition -> offset 映射。
+        Map<TopicPartition, Long> startingOffsets = new LinkedHashMap<>();
 
+        // 设置 0 号分区的启动 offset。
+        startingOffsets.put(topicPartition, nextOffset);
 
-        // TODO 开启 非对齐检查点（barrier非对齐）
-        // 开启的要求： Checkpoint模式必须是精准一次，最大并发必须设为1
-        checkpointConfig.enableUnalignedCheckpoints();
-//        // 开启非对齐检查点才生效： 默认0，表示一开始就直接用 非对齐的检查点
-//        // 如果大于0， 一开始用 对齐的检查点（barrier对齐）， 对齐的时间超过这个参数，自动切换成 非对齐检查点（barrier非对齐）
-        checkpointConfig.setAlignedCheckpointTimeout(Duration.ofSeconds(10));
+        // 打印使用持久化 offset 启动。
+        logger.info("sync-log starts from persisted offset, topic={}, partition=0, nextOffset={}",
+                normalizedTopic, nextOffset);
+
+        // 使用指定 offset 启动；异常缺失分区时回退到 earliest。
+        return OffsetsInitializer.offsets(startingOffsets, OffsetResetStrategy.EARLIEST);
     }
 
 
     /**
-     * 获取某 JobID 下最新存在 _metadata 文件的 checkpoint 路径（chk-xxx），用于作为 savepoint 恢复。
-     * @param checkpointBasePath 例如 file:///F:/flink-checkpoints/demo
-     * @param jobIdHex 例如 aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
-     * @return _metadata 所在的 chk-x 目录的 URI 字符串，如果没有则返回 null
-     * @throws Exception
+     * 根据 Kafka 当前 earliest offset 修正持久化 offset。
      */
-    public static String findLatestCheckpointPathWithMetadata(String checkpointBasePath, String jobIdHex) throws Exception {
-        // 处理 file:/// 前缀，转成本地路径
-        String localBasePath = new Path(checkpointBasePath).toUri().getPath();
+    private Map<String, Long> correctPersistedOffsetsByKafkaEarliest(String logId,
+                                                                     String logTopic,
+                                                                     Map<String, Long> persistedOffsets) throws Exception {
+        // 标准化 topic
+        String normalizedTopic = normalizeText(logTopic);
 
-        File jobDir = new File(localBasePath, jobIdHex);
-        if (!jobDir.exists() || !jobDir.isDirectory()) {
-            return null;
+        // topic 不能为空
+        if (normalizedTopic.isEmpty()) {
+            throw new IllegalArgumentException("logTopic is blank");
         }
 
-        File[] chkDirs = jobDir.listFiles((dir, name) -> name.startsWith("chk-"));
-        if (chkDirs == null || chkDirs.length == 0) {
-            return null;
+        // 复制 offset map，避免修改调用方对象
+        Map<String, Long> safeOffsets =
+                persistedOffsets == null ? new LinkedHashMap<>() : new LinkedHashMap<>(persistedOffsets);
+
+        // 读取配置库中的 nextOffset，缺失时按 0 处理
+        long persistedNextOffset = safeOffsets.getOrDefault(normalizedTopic, 0L);
+
+        // 查询 Kafka 当前仍保留的最早 offset
+        long kafkaEarliestOffset = kafkaUtils.fetchEarliestOffsetOfSinglePartitionTopic(normalizedTopic);
+
+        // 持久化 offset 不能为负数
+        if (persistedNextOffset < 0L) {
+            throw new IllegalStateException("persisted nextOffset cannot be negative, topic=" + normalizedTopic);
         }
 
-        // 按 chk-数字 降序排序
-        Arrays.sort(chkDirs, Comparator.comparing(File::getName).reversed());
 
-        for (File chkDir : chkDirs) {
-            File metadata = new File(chkDir, "_metadata");
-            if (metadata.exists() && metadata.isFile()) {
-                return metadata.getParentFile().toURI().toString(); // chk-x 的路径
-            }
+        // 已持久化 offset 小于 Kafka 当前最早 offset，
+        if (persistedNextOffset < kafkaEarliestOffset) {
+            logger.error("sync-log:{}的持久化offset: {} 不可用，部分日志已无法消费，将跳过过期区间并从Kafka当前最早offset: {} 启动,丢失offset范围={}-{}",
+                        logId,persistedNextOffset,  kafkaEarliestOffset, persistedNextOffset, kafkaEarliestOffset - 1);
+
+
+
+            // 更新 CDC_LOG_TOPIC_OFFSET.NEXT_OFFSET
+            logTopicOffsetRepository.updateNextOffsets(
+                    logId,
+                    Collections.singletonMap(logTopic, kafkaEarliestOffset)
+            );
+
+            // 记录配置库 offset 修正结果
+            logger.warn("sync-log 已修正 CDC_LOG_TOPIC_OFFSET。logId={}，topic={}，correctedNextOffset={}",
+                           logId, logTopic, kafkaEarliestOffset);
+            // 更新内存中的 offset map
+            safeOffsets.put(normalizedTopic, kafkaEarliestOffset);
+
+            // 返回修正后的 offset
+            return safeOffsets;
         }
 
-        return null;
+        // 持久化 offset 仍然可用，直接使用配置库 offset
+        logger.info("sync-log 使用配置库中的日志 topic offset 启动。logId={}，topic={}，persistedNextOffset={}，kafkaEarliestOffset={}",
+                logId, normalizedTopic, persistedNextOffset, kafkaEarliestOffset);
+
+        // 返回原始 offset
+        return safeOffsets;
     }
 
 

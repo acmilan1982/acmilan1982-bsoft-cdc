@@ -1,18 +1,18 @@
-log-server-info:
-  logServerId: log-001
+log-info:
+  logId: log-001
   version: 1.0
-  ip: 192.168.1.174            # sync-server所在机器的IP地址
-  flinkUiPort: 11000           # flink虚拟集群ui的端口号
+  ip: 192.168.0.94            # sync-server所在机器的IP地址
+  flinkUiPort: 16000           # flink虚拟集群ui的端口号
 
 
 server:
-  port: 11002
+  port: 15002
   servlet:
     context-path: /sync-log
 
 config-db:
   driver-class-name: oracle.jdbc.OracleDriver
-  url: jdbc:oracle:thin:@192.168.1.15:1521/orcl
+  url: jdbc:oracle:thin:@192.168.1.199:1521/orcl
   username: CDC
   password: CDC
   maximum-pool-size: 20

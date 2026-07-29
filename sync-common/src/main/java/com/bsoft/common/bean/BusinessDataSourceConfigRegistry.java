@@ -26,6 +26,7 @@ public class BusinessDataSourceConfigRegistry implements Serializable {
 
     public void register(BusinessDataSourceConfig businessDataSourceConfig) {
         businessDataSourceConfigList.add(businessDataSourceConfig);
+        mappingMapByDataSourceId.computeIfAbsent(businessDataSourceConfig.getDataSourceId(), k -> businessDataSourceConfig);
     }
 
 
@@ -40,4 +41,12 @@ public class BusinessDataSourceConfigRegistry implements Serializable {
     public BusinessDataSourceConfig findBusinessDataSourceConfigByDataSourceId(String dataSourceId) {
         return mappingMapByDataSourceId.get(dataSourceId);
     }
+
+    public boolean isEmpty() {
+        return mappingMapByDataSourceId == null
+                || mappingMapByDataSourceId.isEmpty()
+                || businessDataSourceConfigList == null
+                || businessDataSourceConfigList.isEmpty();
+    }
+
 }

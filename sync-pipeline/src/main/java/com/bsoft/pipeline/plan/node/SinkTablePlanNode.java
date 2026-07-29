@@ -1,9 +1,9 @@
 package com.bsoft.pipeline.plan.node;
 
+import com.bsoft.common.bean.ActiveClientCache;
 import com.bsoft.common.factory.TopicNameFactory;
 import com.bsoft.common.pipeline.PlanNodeType;
 import com.bsoft.pipeline.k2k.PipelineExecutionMode;
-import com.bsoft.pipeline.plan.PipelineInitContext;
 import com.bsoft.pipeline.plan.PlanContext;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
@@ -48,9 +48,10 @@ public class SinkTablePlanNode extends AbstractPlanNode {
                              List<String> inputs,
                              String output,
                              Map<String, Object> params,
-                             PipelineInitContext initContext) {
-        super(id, PlanNodeType.SINK_TABLE, inputs, output, params, initContext);
-        this.bootstrapServers = resolveBootstrapServers(params, this.initContext);
+                             PlanContext planContext) {
+        super(id, PlanNodeType.SINK_TABLE, inputs, output, params, planContext);
+        // kafka 地址
+        this.bootstrapServers = resolveBootstrapServers(params, planContext);
         resolveTopicsFromNodeValue(params);
     }
 
@@ -253,13 +254,13 @@ public class SinkTablePlanNode extends AbstractPlanNode {
 
     // -------------------- 参数解析 --------------------
 
-    private static String resolveBootstrapServers(Map<String, Object> params, PipelineInitContext initContext) {
+    private static String resolveBootstrapServers(Map<String, Object> params,PlanContext planContext) {
         String fromParams = nullableString(params, "bootstrapServers");
         if (fromParams != null) {
             return fromParams;
         }
 
-        String fromInit = initContext.getString(PipelineInitContext.KAFKA_BOOTSTRAP_SERVERS);
+        String fromInit = planContext.getKafkaBootstrapServers();
         if (fromInit != null) {
             return fromInit;
         }
@@ -282,6 +283,8 @@ public class SinkTablePlanNode extends AbstractPlanNode {
             throw new IllegalArgumentException("SINK_TABLE param `target` must be a List");
         }
 
+
+        String clientId = defaultIfBlank(String.valueOf(params.get("client_id")), "");
         List<?> list = (List<?>) targetObj;
         for (Object item : list) {
             if (!(item instanceof Map)) {
@@ -289,11 +292,13 @@ public class SinkTablePlanNode extends AbstractPlanNode {
             }
             Map<String, Object> map = (Map<String, Object>) item;
 
+
             String dataSourceId = defaultIfBlank(String.valueOf(map.get("data_source_id")), "");
             String tableName = defaultIfBlank(String.valueOf(map.get("table_name")), "");
 
             if (!tableName.isEmpty()) {
-                topics.add(TopicNameFactory.generateAssocTopic(tableName, dataSourceId));
+
+                topics.add(TopicNameFactory.generateAssocTopic(clientId,tableName, dataSourceId));
             }
         }
 

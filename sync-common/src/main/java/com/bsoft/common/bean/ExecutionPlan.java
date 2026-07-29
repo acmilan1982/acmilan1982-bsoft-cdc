@@ -26,7 +26,7 @@ import java.util.stream.Collectors;
  * @Author: snoopy
  * @Create: 2025/7/27 - 13:19
  */
-@Component
+
 public class ExecutionPlan implements Serializable {
 
     // 上一次 表级别 执行计划
@@ -41,8 +41,8 @@ public class ExecutionPlan implements Serializable {
     boolean hasTablesInSnapshotState = false;
 
 
-    @Autowired
-    private TopicInfoFactory topicInfoFactory;
+
+    private TopicInfoFactory topicInfoFactory = new TopicInfoFactory();
 
     public ExecutionPlan() {
 
@@ -82,15 +82,24 @@ public class ExecutionPlan implements Serializable {
 
     // 便利方法：添加单个执行计划项
     public void addPlanItem(TableExecutionPlan item) {
-        if (this.tableExecutionPlans == null) {
-            this.tableExecutionPlans = new ArrayList<>();
-        }
         this.tableExecutionPlans.add(item);
     }
 
     // 便利方法：添加执行计划项
     public void addPlanItem(String fromDataSourceId, String toDataSourceId, String schemaName, String tableName, String tableStatus, SimpleClientInfo clientInfo) {
         addPlanItem(new TableExecutionPlan(fromDataSourceId,
+                                           toDataSourceId,
+                                           schemaName,
+                                           tableName,
+                                           TableStatus.valueOf(tableStatus),
+                                           clientInfo
+        ));
+    }
+
+    // 便利方法：添加执行计划项
+    public void addPlanItem(String clientId, String fromDataSourceId, String toDataSourceId, String schemaName, String tableName, String tableStatus, SimpleClientInfo clientInfo) {
+        addPlanItem(new TableExecutionPlan(clientId,
+                                           fromDataSourceId,
                                            toDataSourceId,
                                            schemaName,
                                            tableName,
@@ -152,74 +161,71 @@ public class ExecutionPlan implements Serializable {
 
 
 
-
-
-
-    //---------------客户端，中心端生成主题的方式统一在这里，最后都会调用topicInfoFactory去生成----------------
-
-    // 根据客户端的启动模式，生成当前客户端所需的所有主题
-    public List<ClientTopicInfo> generateClientTopicInfo(ClientInfo clientInfo) {
-
-        topicInfoFactory.setClientInfo(clientInfo);
-
-        JobStartupMode jobStartupMode = clientInfo.getJobStartupMode();
-        // 如果是正常模式，生成普通模式的主题信息
-        if (jobStartupMode == JobStartupMode.NORMAL) {
-            return generateNormalClientTopicInfo(clientInfo);
-        }
-
-        // 如果是快照模式，生成快照模式的主题信息
-        if (jobStartupMode == JobStartupMode.SNAPSHOT) {
-            return generateSnapShotClientTopicInfo(clientInfo);
-        }
-
-        return new ArrayList<>(); // 如果不是正常模式或快照模式，返回空列表
-    }
-
-    // 生成普通模式的主题信息
-    public List<ClientTopicInfo> generateNormalClientTopicInfo(ClientInfo clientInfo) {
-        return generateClientTopicInfo(clientInfo,tableExecutionPlans);
-    }
-
-    // 生成快照模式的主题信息
-    public List<ClientTopicInfo> generateSnapShotClientTopicInfo(ClientInfo clientInfo) {
-        // 处于快照模式的执行计划
-        List<ExecutionPlan.TableExecutionPlan> snapshotTableExecutionPlans =
-                this.tableExecutionPlans.stream().filter(ExecutionPlan.TableExecutionPlan::isInSnapshotState).collect(Collectors.toList());
-        return generateClientTopicInfo(clientInfo,snapshotTableExecutionPlans);
-    }
-
-    // 根据执行计划，生成的主题信息
-    public List<ClientTopicInfo> generateClientTopicInfo(ClientInfo clientInfo,
-                                  List<ExecutionPlan.TableExecutionPlan> tableExecutionPlanList) {
-
-        // 根据执行计划来生成主题
-        return topicInfoFactory.generateClientTopicInfo(tableExecutionPlanList);
-    }
-
-
-    // 根据执行计划，生成服务端的主题信息，同时会生成每个主题对应的目标表名
-    public List<ServerTopicInfo> generateServerTopicInfo(BusinessDataSourceConfigRegistry businessDataSourceConfigRegistry,
-                                        TargetDataSourceConfigRegistry targetDataSourceConfigRegistry,
-                                        ServerInfo serverInfo,
-                                        DatasourceConfigFetcher configFetcher) throws Exception {
-
-        topicInfoFactory.setServerInfo(serverInfo);
-        return  topicInfoFactory.generateServerTopicInfo(businessDataSourceConfigRegistry,
-                                                         targetDataSourceConfigRegistry,
-                                                         this.tableExecutionPlans,
-                                                          configFetcher);
-
-
-
-    }
-
+//
+//
+//
+//    //---------------客户端，中心端生成主题的方式统一在这里，最后都会调用topicInfoFactory去生成----------------
+//
+//    // 根据客户端的启动模式，生成当前客户端所需的所有主题
+//    public List<ClientTopicInfo> generateClientTopicInfo(JobStartupMode jobStartupMode) {
+//
+//
+//        // 如果是正常模式，生成普通模式的主题信息
+//        if (jobStartupMode == JobStartupMode.NORMAL) {
+//            return generateNormalClientTopicInfo();
+//        }
+//
+//        // 如果是快照模式，生成快照模式的主题信息
+//        if (jobStartupMode == JobStartupMode.SNAPSHOT) {
+//            return generateSnapShotClientTopicInfo();
+//        }
+//
+//        return new ArrayList<>(); // 如果不是正常模式或快照模式，返回空列表
+//    }
+//
+//    // 生成普通模式的主题信息
+//    public List<ClientTopicInfo> generateNormalClientTopicInfo() {
+//        return generateClientTopicInfo(tableExecutionPlans);
+//    }
+//
+//    // 生成快照模式的主题信息
+//    public List<ClientTopicInfo> generateSnapShotClientTopicInfo() {
+//        // 处于快照模式的执行计划
+//        List<ExecutionPlan.TableExecutionPlan> snapshotTableExecutionPlans =
+//                this.tableExecutionPlans.stream().filter(ExecutionPlan.TableExecutionPlan::isInSnapshotState).collect(Collectors.toList());
+//        return generateClientTopicInfo(snapshotTableExecutionPlans);
+//    }
+//
+//    // 根据执行计划，生成的主题信息
+//    public List<ClientTopicInfo> generateClientTopicInfo(List<ExecutionPlan.TableExecutionPlan> tableExecutionPlanList) {
+//        // 根据执行计划来生成主题
+//        return topicInfoFactory.generateClientTopicInfo(tableExecutionPlanList);
+//    }
+//
+//
+//    // 根据执行计划，生成服务端的主题信息，同时会生成每个主题对应的目标表名
+//    public List<ServerTopicInfo> generateServerTopicInfo(BusinessDataSourceConfigRegistry businessDataSourceConfigRegistry,
+//                                        TargetDataSourceConfigRegistry targetDataSourceConfigRegistry,
+//                                        DatasourceConfigFetcher configFetcher) throws Exception {
+//
+//        return  topicInfoFactory.generateServerTopicInfo(businessDataSourceConfigRegistry,
+//                                                         targetDataSourceConfigRegistry,
+//                                                         this.tableExecutionPlans,
+//                                                          configFetcher);
+//
+//
+//
+//    }
+//
 
 
     /**
      * 执行计划项内部类，表示单个表的执行信息
      */
     public static class TableExecutionPlan implements Serializable {
+
+        // 执行当前计划的客户端id
+        private String clientId;
 
         // 业务库数据源id
         private String fromDataSourceId;
@@ -242,6 +248,15 @@ public class ExecutionPlan implements Serializable {
 
         public TableExecutionPlan(String fromDataSourceId, String toDataSourceId, String schemaName, String tableName, TableStatus tableStatus,SimpleClientInfo clientInfo) {
             this.fromDataSourceId = fromDataSourceId;
+            this.toDataSourceId = toDataSourceId;
+            this.schemaName = schemaName;
+            this.tableName = tableName;
+            this.tableStatus = tableStatus;
+            this.clientInfo = clientInfo;
+        }
+
+        public TableExecutionPlan(String clientId, String fromDataSourceId, String toDataSourceId, String schemaName, String tableName, TableStatus tableStatus,SimpleClientInfo clientInfo) {
+            this.clientId = clientId;
             this.toDataSourceId = toDataSourceId;
             this.schemaName = schemaName;
             this.tableName = tableName;
@@ -303,17 +318,17 @@ public class ExecutionPlan implements Serializable {
             return this.clientInfo.getClientId();
         }
 
-        public TableNamingStrategy getTableNamingStrategy() {
-            return this.clientInfo.getTableNamingStrategy();
-        }
-
-        public String getTableNamePrefix() {
-            return this.clientInfo.getTableNamePrefix();
-        }
-
-        public String getTableNameSuffix() {
-            return this.clientInfo.getTableNameSuffix();
-        }
+//        public TableNamingStrategy getTableNamingStrategy() {
+//            return this.clientInfo.getTableNamingStrategy();
+//        }
+//
+//        public String getTableNamePrefix() {
+//            return this.clientInfo.getTableNamePrefix();
+//        }
+//
+//        public String getTableNameSuffix() {
+//            return this.clientInfo.getTableNameSuffix();
+//        }
 
 
         public SimpleClientInfo getClientInfo() {

@@ -3,33 +3,16 @@ package com.bsoft.server.sql.insert;
 import com.bsoft.common.bean.ColumnInfo;
 import com.bsoft.common.bean.TargetDataSourceConfig;
 import com.bsoft.common.constants.CdcColumnConstants;
-import com.bsoft.common.log.LogCollector;
+import com.bsoft.common.util.ExceptionDetailUtil;
 import com.bsoft.server.batch.BatchInsertItem;
 import com.bsoft.server.batch.BatchSizeManager;
 import com.bsoft.server.sql.doris.DorisCustomColumnMappingSupport;
 import com.bsoft.server.sql.doris.http.DorisStreamLoadHelper;
 import com.bsoft.server.sql.factory.DatabaseAdapterFactory;
-import com.bsoft.server.sql.doris.http.DorisConnectionInfo;
 import com.bsoft.server.sql.doris.http.StreamLoadResult;
-import com.fasterxml.jackson.databind.ObjectMapper;
-import org.apache.commons.codec.binary.Base64;
-import org.apache.http.HttpHeaders;
-import org.apache.http.client.methods.CloseableHttpResponse;
-import org.apache.http.client.methods.HttpPut;
-import org.apache.http.entity.StringEntity;
-import org.apache.http.impl.client.CloseableHttpClient;
-import org.apache.http.impl.client.DefaultRedirectStrategy;
-import org.apache.http.impl.client.HttpClientBuilder;
-import org.apache.http.impl.client.HttpClients;
-import org.apache.http.util.EntityUtils;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 
-import java.nio.charset.StandardCharsets;
-import java.sql.PreparedStatement;
-import java.sql.SQLException;
-import java.sql.Timestamp;
-import java.time.Instant;
 import java.util.*;
 import java.util.stream.Collectors;
 
@@ -112,7 +95,7 @@ public class DorisInsertStrategy extends AbstractInsertStrategy {
         } catch (Exception e) {
             streamLoadResult = new StreamLoadResult(
                     false, 0, 0,
-                    "执行异常: " + LogCollector.getSafeStackTraceHead(e, 40, 4000));
+                    "执行异常: " + ExceptionDetailUtil.buildRootCauseDetail(e, 2000));
         } finally {
             batchSizeManager.adjustBatchSizeByPerformance(System.currentTimeMillis() - startTime, batchItems);
 

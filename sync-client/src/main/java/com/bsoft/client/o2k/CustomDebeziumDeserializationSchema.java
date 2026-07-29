@@ -146,8 +146,14 @@ public class CustomDebeziumDeserializationSchema implements DebeziumDeserializat
         // 发往下游，用来更新scn
         out.collect(jsonOutput);
 
+//        // 如果处于快照模式，且已经完成快照，发送完成信号，检测 snapshot = "last" - 表示该表的快照已完成
+//        if(clientInfo.getJobStartupMode() == JobStartupMode.SNAPSHOT && "last".equalsIgnoreCase(snapshotValue)){
+//            // 检查并处理快照完成信号
+//            handleSnapshotCompletionSignal(out);
+//        }
+
         // 如果处于快照模式，且已经完成快照，发送完成信号，检测 snapshot = "last" - 表示该表的快照已完成
-        if(clientInfo.getJobStartupMode() == JobStartupMode.SNAPSHOT && "last".equalsIgnoreCase(snapshotValue)){
+        if( "last".equalsIgnoreCase(snapshotValue)){
             // 检查并处理快照完成信号
             handleSnapshotCompletionSignal(out);
         }

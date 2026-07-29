@@ -5,6 +5,8 @@ import com.bsoft.common.bean.TableDDLRequest;
 import com.bsoft.common.dbmeta.OracleColumnsQueryResult;
 import com.bsoft.common.dbmeta.OracleSqlColumnsQueryRequest;
 import com.bsoft.common.global.GlobalZooKeeperManager;
+import com.bsoft.common.zk.ZkClientRegistry;
+import javax.annotation.PreDestroy;
 import com.bsoft.common.http.AbstractHTTPClient;
 import com.bsoft.common.http.ApiResponse;
 import org.apache.logging.log4j.LogManager;
@@ -49,14 +51,12 @@ public class SyncClientHTTPClient extends AbstractHTTPClient {
 
     @PostConstruct
     public void init() throws Exception {
-        this.globalZooKeeperManager = GlobalZooKeeperManager.getInstance(serverInfo);
-
-        System.out.println();
+        this.zkClient = ZkClientRegistry.acquire(serverInfo.getZooKeeperConfig());
     }
 
     // 向探针端请求表结构信息，用于建表或扩展字段，异步投递
     public void requestTableDdlExport(TableDDLRequest request) throws Exception {
-        Objects.requireNonNull(request, "tableDDLRequest cannot be null");
+        Objects.requireNonNull(request, "request cannot be null");
         String clientId = resolveClientId(request);
 
         postAsyncExport(
@@ -206,5 +206,15 @@ public class SyncClientHTTPClient extends AbstractHTTPClient {
 //        }
 //    }
 
-
+    @PreDestroy
+    public void shutdown() {
+        try {
+            if (zkClient != null) {
+                ZkClientRegistry.release(serverInfo.getZooKeeperConfig());
+                zkClient = null;
+            }
+        } catch (Exception e) {
+            logger.warn("Failed to release shared ZkClient in SyncClientHTTPClient", e);
+        }
+    }
 }

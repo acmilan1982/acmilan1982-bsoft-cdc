@@ -71,9 +71,21 @@ public enum JobStatus {
     FAILED("9001", "有异常"),
 
     /**
+     * 作业失败，等待自动重启。
+     */
+    FAILED_WAITING_RESTART("9002", "作业失败，等待自动重启"),
+
+    /**
+     * 作业正在自动重启。
+     */
+    RESTARTING("9003", "作业正在自动重启"),
+    /**
      * 快照模式已完成
      */
     SNAPSHOT_COMPLETED("1005", "快照模式已完成");
+
+
+
 
     private final String code;
     private final String description;

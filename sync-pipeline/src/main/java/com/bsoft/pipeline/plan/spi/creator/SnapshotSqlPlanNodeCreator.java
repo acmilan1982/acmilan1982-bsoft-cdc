@@ -1,7 +1,7 @@
 package com.bsoft.pipeline.plan.spi.creator;
 
 import com.bsoft.common.pipeline.model.PlanNodeSpec;
-import com.bsoft.pipeline.plan.PipelineInitContext;
+import com.bsoft.pipeline.plan.PlanContext;
 import com.bsoft.pipeline.plan.PlanNode;
 import com.bsoft.pipeline.plan.node.SnapshotSqlPlanNode;
 
@@ -15,8 +15,8 @@ import com.bsoft.pipeline.plan.node.SnapshotSqlPlanNode;
  */
 public class SnapshotSqlPlanNodeCreator extends AbstractPlanNodeCreator {
 
-    public SnapshotSqlPlanNodeCreator(PipelineInitContext initContext) {
-        super(initContext);
+    public SnapshotSqlPlanNodeCreator(PlanContext planContext) {
+        super(planContext);
     }
 
     @Override
@@ -26,7 +26,7 @@ public class SnapshotSqlPlanNodeCreator extends AbstractPlanNodeCreator {
                 spec.getInputs(),
                 spec.getOutput(),
                 spec.getParams(),
-                initContext
+                this.getContext()
         );
     }
 }

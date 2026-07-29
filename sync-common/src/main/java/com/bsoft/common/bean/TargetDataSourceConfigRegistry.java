@@ -42,4 +42,11 @@ public class TargetDataSourceConfigRegistry implements Serializable {
     public void setTargetDataSourceConfigList(List<TargetDataSourceConfig> targetDataSourceConfigList) {
         this.targetDataSourceConfigList = targetDataSourceConfigList;
     }
+
+    public boolean isEmpty() {
+        return mappingMapByDataSourceId == null
+                || mappingMapByDataSourceId.isEmpty()
+                || targetDataSourceConfigList == null
+                || targetDataSourceConfigList.isEmpty();
+    }
 }

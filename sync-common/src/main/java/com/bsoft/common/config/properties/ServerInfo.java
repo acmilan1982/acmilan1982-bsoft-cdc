@@ -4,6 +4,7 @@ import com.bsoft.common.bean.ConfigDataSourceConfig;
 import com.bsoft.common.bean.RawMessageStorageStrategy;
 import com.bsoft.common.bean.SubscriberMappingRegistry;
 import com.bsoft.common.bean.TargetDataSourceConfigRegistry;
+import com.bsoft.common.enums.DatabaseType;
 import com.bsoft.common.enums.JobStatus;
 //import com.bsoft.common.enums.TableNamingStrategy;
 import com.bsoft.common.enums.TableRowDeleteStrategy;
@@ -15,6 +16,9 @@ import org.springframework.stereotype.Component;
 
 import javax.annotation.PostConstruct;
 import java.io.Serializable;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.List;
 
 
 @Component
@@ -29,8 +33,7 @@ public class ServerInfo extends  BaseInfo  implements Serializable {
     // 目标库数据源
     private TargetDataSourceConfigRegistry targetDataSourceConfigRegistry;
 
-    // 配置库数据源
-    private ConfigDataSourceConfig configDataSourceConfig;
+
 
     // 订阅关系
     private SubscriberMappingRegistry subscriberMappingRegistry;
@@ -84,6 +87,13 @@ public class ServerInfo extends  BaseInfo  implements Serializable {
 
 
 
+    // 指定类型的目标库：启用实时新增数据启用批量写入
+    // 配置项: server-info.realtime-insert-batch-enabled-database-types
+    // 未配置或配置为空时，默认只启用 DORIS。
+    private List<DatabaseType> realtimeInsertBatchEnabledDatabaseTypes = new ArrayList<>(
+            Collections.singletonList(DatabaseType.DORIS)
+    );
+
     public ServerInfo() {
 
     }
@@ -116,13 +126,6 @@ public class ServerInfo extends  BaseInfo  implements Serializable {
     }
 
 
-    public ConfigDataSourceConfig getConfigDataSourceConfig() {
-        return configDataSourceConfig;
-    }
-
-    public void setConfigDataSourceConfig(ConfigDataSourceConfig configDataSourceConfig) {
-        this.configDataSourceConfig = configDataSourceConfig;
-    }
 
     public SubscriberMappingRegistry getSubscriberMappingRegistry() {
         return subscriberMappingRegistry;
@@ -231,6 +234,43 @@ public class ServerInfo extends  BaseInfo  implements Serializable {
         this.monitorMetricTopic = monitorMetricTopic;
     }
 
+    // 获取实时新增数据启用批量写入的目标库类型列表。
+    // 返回内部配置列表，供配置绑定和运行期判断使用。
+    public List<DatabaseType> getRealtimeInsertBatchEnabledDatabaseTypes() {
+        return realtimeInsertBatchEnabledDatabaseTypes;
+    }
 
+    // 设置实时新增数据启用批量写入的目标库类型列表。
+    // 如果配置为空，则回退到默认值 DORIS，保证未配置时生产行为符合当前预期。
+    public void setRealtimeInsertBatchEnabledDatabaseTypes(List<DatabaseType> realtimeInsertBatchEnabledDatabaseTypes) {
+        // 配置为空时使用默认值 DORIS。
+        if (realtimeInsertBatchEnabledDatabaseTypes == null || realtimeInsertBatchEnabledDatabaseTypes.isEmpty()) {
+            this.realtimeInsertBatchEnabledDatabaseTypes = new ArrayList<>(
+                    Collections.singletonList(DatabaseType.DORIS)
+            );
+            return;
+        }
+
+        // 保存配置值。
+        this.realtimeInsertBatchEnabledDatabaseTypes = realtimeInsertBatchEnabledDatabaseTypes;
+    }
+
+    // 判断指定目标库类型是否启用实时新增批量写入。
+    // TargetTableWriteProcessFunction 通过该方法决定 r/c 是否进入实时批量缓冲区。
+    public boolean isRealtimeInsertBatchEnabled(DatabaseType databaseType) {
+        // 空数据库类型不启用批量。
+        if (databaseType == null) {
+            return false;
+        }
+
+        // 配置列表为空时按默认 DORIS 处理，避免外部误置空集合导致 Doris 批量关闭。
+        if (this.realtimeInsertBatchEnabledDatabaseTypes == null
+                || this.realtimeInsertBatchEnabledDatabaseTypes.isEmpty()) {
+            return databaseType == DatabaseType.DORIS;
+        }
+
+        // 判断当前目标库类型是否在启用列表中。
+        return this.realtimeInsertBatchEnabledDatabaseTypes.contains(databaseType);
+    }
 
 }

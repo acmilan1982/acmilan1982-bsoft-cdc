@@ -20,7 +20,6 @@ import com.bsoft.common.bean.*;
 import com.bsoft.common.config.properties.ServerInfo;
 import com.bsoft.common.config.properties.SimpleClientInfo;
 import com.bsoft.common.dbmeta.OracleColumnMetadata;
-import com.bsoft.common.dbmeta.OracleSqlColumnsQueryRequest;
 import com.bsoft.common.dbmeta.SqlResultCreateTableRequest;
 import com.bsoft.common.dbmeta.TableExistsCheckRequest;
 import com.bsoft.common.dto.TableMappingConfigDTO;
@@ -42,12 +41,10 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
 
-import javax.annotation.PostConstruct;
 import javax.annotation.PreDestroy;
 import java.util.*;
 import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicBoolean;
-import java.util.regex.Pattern;
 
 /**
  * 控制 CDC 任务的接口，供 Web 管理平台调用。
@@ -90,16 +87,74 @@ public class ServerController {
     // value: 该SQL节点 params["doris"] 转成 DorisBizAttr
     private  Map<String, DorisBizAttr> dorisBizAttrBySqlNodeId = new LinkedHashMap<>();
 
+    // 按业务库 ID -> 目标库 ID 缓存目标表命名规则
+    private volatile Map<String, Map<String, TargetTableNamingRule>> targetTableNamingRuleMap = Collections.emptyMap();
+
     // 初始化，创建目标库对应的 读写 对象，读对象用于检查表是否存在，写对象用于创建表
     // 每个目标库，都有自己的 读写对象
-    public void init(TargetDataSourceConfigRegistry targetDataSourceConfigRegistry){
+    public void init(BusinessDataSourceConfigRegistry businessDataSourceConfigRegistry,
+                     TargetDataSourceConfigRegistry targetDataSourceConfigRegistry) {
         for (TargetDataSourceConfig targetDataSourceConfig : targetDataSourceConfigRegistry.getTargetDataSourceConfigList()) {
             tableMetadataReaderWriterRegistry.register(targetDataSourceConfig);
         }
 
-        logger.info("ServerController初始化完成...................");
+        this.targetTableNamingRuleMap = buildTargetTableNamingRuleMap(businessDataSourceConfigRegistry);
+
+        logger.info("ServerController初始化完成, targetTableNamingRule count={}",
+                this.targetTableNamingRuleMap.size());
     }
 
+    private Map<String, Map<String, TargetTableNamingRule>> buildTargetTableNamingRuleMap(
+            BusinessDataSourceConfigRegistry businessDataSourceConfigRegistry) {
+
+        Map<String, Map<String, TargetTableNamingRule>>  result = new LinkedHashMap<>();
+        if (businessDataSourceConfigRegistry == null
+                || businessDataSourceConfigRegistry.getBusinessDataSourceConfigList() == null) {
+            return result;
+        }
+
+        for (BusinessDataSourceConfig config : businessDataSourceConfigRegistry.getBusinessDataSourceConfigList()) {
+            if (config == null || config.getDataSourceId() == null || config.getDataSourceId().trim().isEmpty()) {
+                continue;
+            }
+
+            Map<String, TargetTableNamingRule> rule = config.getTargetTableNamingRule();
+            if (rule == null) {
+                throw new IllegalStateException("业务库未配置 targetTableNamingRule, dataSourceId=" + config.getDataSourceId());
+            }
+
+            result.put(config.getDataSourceId(), rule);
+        }
+
+        return result;
+    }
+
+
+    private TargetTableNamingRule requireTargetTableNamingRule(String sourceDataSourceId,String targetDataSourceId) {
+        String sourceId = normalizeRequiredId(sourceDataSourceId, "sourceDataSourceId");
+        String targetId = normalizeRequiredId(targetDataSourceId, "targetDataSourceId");
+
+        Map<String, TargetTableNamingRule> rulesByTargetDataSourceId = targetTableNamingRuleMap.get(sourceId);
+        if (rulesByTargetDataSourceId == null) {
+            throw new IllegalStateException("未找到业务库目标表命名规则, sourceDataSourceId=" + sourceId);
+        }
+
+        TargetTableNamingRule rule = rulesByTargetDataSourceId.get(targetId);
+        if (rule == null) {
+            throw new IllegalStateException(
+                    "未找到目标表命名规则, sourceDataSourceId=" + sourceId + ", targetDataSourceId=" + targetId
+            );
+        }
+
+        return rule;
+    }
+
+    private String normalizeRequiredId(String value, String fieldName) {
+        if (value == null || value.trim().isEmpty()) {
+            throw new IllegalArgumentException(fieldName + " 不能为空");
+        }
+        return value.trim();
+    }
 
     public void startWorkers() {
         if (!running.compareAndSet(false, true)) {
@@ -208,15 +263,24 @@ public class ServerController {
 
     // 最常规的单表建表：根据传入的单表配置列表，创建目标库中的表（如果不存在的话），
     private void createTableIfNecessary(TableDDLRequestWrapper tableDDLRequestWrapper) throws Exception {
+        // TableDDLRequestWrapper 中包含原始请求数据:TableDDLRequest
+        TableDDLRequest tableDDLRequest = tableDDLRequestWrapper.getTableDDLRequest();
+        // 业务库的 数据源id
+        String dataSourceId = tableDDLRequest.getBusinessDataSourceId();
+        String targetDataSourceId = tableDDLRequest.getTargetDataSourceId();
+        // 业务库的 建表策略
+        TargetTableNamingRule targetTableNamingRule = requireTargetTableNamingRule(dataSourceId,targetDataSourceId);
+
+
         // TableDDLRequestWrapper 中包含原始请求数据，包括目标库的TargetDataSourceConfig
-        TargetDataSourceConfig targetDataSourceConfig = requireTargetDataSourceConfig(tableDDLRequestWrapper.getTableDDLRequest().getTargetDataSourceId());
+        TargetDataSourceConfig targetDataSourceConfig = requireTargetDataSourceConfig(tableDDLRequest.getTargetDataSourceId());
+        // 目标表的类型
+        DatabaseType dataSourceType = targetDataSourceConfig.getDataSourceType();
+
+
         // 一般情况下，tableMappingConfigDTOList 只会有一个元素，表示单个表的建表请求
         TableMappingConfigDTO tableMappingConfigDTO = tableDDLRequestWrapper.getTableMappingConfigDTOList().get(0);
 
-        TableDDLRequest tableDDLRequest = tableDDLRequestWrapper.getTableDDLRequest();
-
-        // 目标表的类型
-        DatabaseType dataSourceType = targetDataSourceConfig.getDataSourceType();
 
         // 走表名推导流程
         CreateTableContext ctx = CreateTableContext.forSourceTable(
@@ -224,7 +288,8 @@ public class ServerController {
                 tableMappingConfigDTO,
                 tableMetadataReaderWriterRegistry.getTableMetadataReaderWriterPair(targetDataSourceConfig),
                 dataSourceType,
-                DDLBuildContext.systemDefault()  // 库级别建表参数
+                DDLBuildContext.systemDefault(),
+                targetTableNamingRule
         );
         createTableIfNecessary(ctx);
 
@@ -303,28 +368,23 @@ public class ServerController {
 
         SimpleClientInfo clientInfo = ctx.getClientInfo();
         String clientId = clientInfo.getClientId();
-        TableNamingStrategy tableNamingStrategy = clientInfo.getTableNamingStrategy();
-        String tableNamePrefix = clientInfo.getTableNamePrefix();
-        String tableNameSuffix = clientInfo.getTableNameSuffix();
+        TargetTableNamingRule targetTableNamingRule = ctx.getTargetTableNamingRule();
+
         DatabaseType databaseType = ctx.getDatabaseType();
 
         // 初步定义表名(可能不是最终表名)：根据目标表名的生成策略，生成目标表名
         // TABLE_MERGE,CLIENTID_SCHEMA_TABLE，CUSTOM_PREFIX:这三种模式，此时生成的表名不会变，现在生成的表名就是最终的表名
-        // TABLE_PREFIX：根据表是否存在，可能会被修改
-        String targetTableName = tableNameGenerator.generateTargetTableName(
-                clientId,
-                tableMappingConfig,
-                databaseType,
-                tableNamingStrategy,
-                tableNamePrefix,
-                tableNameSuffix
-        );
+        // PREFIX_ON_CONFLICT：根据表是否存在，可能会被修改
+        String targetTableName = tableNameGenerator.generateTargetTableName(targetTableNamingRule,
+                                                                            clientId,
+                                                                            tableMappingConfig,
+                                                                            databaseType);
 
         // 1. 判断目标表名是否存在
         boolean tableExists = reader.isTableExists(targetTableName);
 
-        // 2. 如果目标表名存在，且当前的表命名策略是 TABLE_PREFIX(前缀)，生成表名，再次检查是否存在
-        if (tableExists && TableNamingStrategy.TABLE_PREFIX == tableNamingStrategy) {
+        // 2. 如果目标表名存在，且当前的表命名策略是 PREFIX_ON_CONFLICT(前缀)，生成表名，再次检查是否存在
+        if (tableExists && TableNamingStrategy.PREFIX_ON_CONFLICT == targetTableNamingRule.getTableNamingStrategy()) {
             targetTableName = tableNameGenerator.generateTargetTableName(
                     clientId,
                     tableMappingConfig,
@@ -676,8 +736,9 @@ public class ServerController {
     // 自定义 sql 建表
     private void processSqlResultCreateTable(SqlResultCreateTableRequest req) throws Exception {
 
-        TargetDataSourceConfig targetDataSourceConfig =
-                requireTargetDataSourceConfig(req.getTargetDataSourceId());
+        TargetDataSourceConfig targetDataSourceConfig = requireTargetDataSourceConfig(req.getTargetDataSourceId());
+        String fromDataSourceId = req.getFromDataSourceId();
+        String targetDataSourceId = req.getTargetDataSourceId();
 
         DatabaseType databaseType = targetDataSourceConfig.getDataSourceType();
         String targetTableName = req.getTargetTableName().trim();
@@ -710,6 +771,7 @@ public class ServerController {
                 pair,
                 databaseType,
                 ddlBuildContext,
+                requireTargetTableNamingRule(fromDataSourceId,targetDataSourceId),
                 targetTableName                   // 直接指定 目标表名，无需再生成
         );
 

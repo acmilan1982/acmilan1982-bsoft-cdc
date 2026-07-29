@@ -13,11 +13,18 @@ import java.util.Map;
  * @Author: snoopy
  * @Create: 2026/3/4 - 17:23
  */
+
+// 单个节点
 public class PlanNodeSpec {
+    // 节点id
     private String id;
+    // 节点类型
     private PlanNodeType type;
+    // 节点的输入id
     private List<String> inputs;
+    // 节点的输出id
     private String output;
+    // 节点的参数
     private Map<String, Object> params;
 
     public String getId() { return id; }

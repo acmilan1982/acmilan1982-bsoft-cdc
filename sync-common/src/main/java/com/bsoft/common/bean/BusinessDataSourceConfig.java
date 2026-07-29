@@ -5,6 +5,8 @@ import com.bsoft.common.dbmeta.OracleTableMetadataReader;
 import com.bsoft.common.enums.DatabaseType;
 import com.zaxxer.hikari.HikariConfig;
 import com.zaxxer.hikari.HikariDataSource;
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Logger;
 
 import javax.sql.DataSource;
 import java.io.Serializable;
@@ -17,6 +19,8 @@ import java.util.function.Function;
  * @author snoopy
  */
 public class BusinessDataSourceConfig implements Serializable {
+
+    private static final Logger logger = LogManager.getLogger(BusinessDataSourceConfig.class);
 
     private String dataSourceId;             // 业务库主键
     private String dataSourceOrg;            // 数据源机构
@@ -45,49 +49,47 @@ public class BusinessDataSourceConfig implements Serializable {
     private String clientId;         // 客户端id
     private List<String>  schemaList;         // 客户端id
 
-
+    // 当前业务库的订阅计划，由于每个业务库可能有多个目标库，因此用 List 保存
+    private List<SubscriberMapping> subscriberMappingList = new ArrayList<>();
 
     private List<TableMappingConfig> snapShotTableMappingConfigList = new ArrayList<>();
 
-    // 当前业务库的订阅关系(一对一)
-    private SubscriberMappingRegistry subscriberMappingRegistry;
+//    // 当前业务库的订阅关系(一对一)
+//    private SubscriberMappingRegistry subscriberMappingRegistry;
+//
+//    // 当前业务库需要同步到的 所有目标库
+//    private TargetDataSourceConfigRegistry targetDataSourceConfigRegistry;
 
-    // 当前业务库需要同步到的 所有目标库
-    private TargetDataSourceConfigRegistry targetDataSourceConfigRegistry;
 
-
-
+    // 目标表命名规则，来源于 CDC_DATA_SOURCE_EXTEND
+    private Map<String, TargetTableNamingRule> targetTableNamingRuleMap;
 
 
     public BusinessDataSourceConfig() {
 
     }
 
+    // 客户端初始化专用
     // 初始化,为每个源表，创建对应的 TableMappingConfig
     public void init() {
-        // 创建源表的TableMappingConfig，一个源表只对应一个TableMappingConfig
         this.tableMappingConfigList = buildTableMappingConfigList();
-        // 以表的全限定名为key，转换成Map
         convertListToMapBySourceTableName();
-        // 以schema为key分组
         convertListToMapBySchemaName();
-
     }
 
 
-
+    // 客户端执行当前操作，中心端不执行
     // 批量创建源表的TableMappingConfig，一个源表只对应一个TableMappingConfig
     private List<TableMappingConfig> buildTableMappingConfigList(){
         // 收集所有需要同步的表，订阅关系中，一个源表可能需要同步到多个目标库，这里去重
         HashSet<Table> tableSet = new HashSet<>();
 
         // 通过订阅关系，获取所有需要同步的表
-        if(clientId != null){
-            for (SubscriberMapping subscriberMapping : subscriberMappingRegistry.findSubscriberMappingByDataFromSourceId(this)) {
-                subscriberMapping.getSourceTableNameList().stream().forEach(tableSet::add);
-            }
-
+        for (SubscriberMapping subscriberMapping : subscriberMappingList) {
+            tableSet.addAll(subscriberMapping.getSourceTableNameList());
         }
+
+
         // 为每个表，创建对应的TableMappingConfig
         return tableSet.stream()
                 .map(this::buildTableMappingConfigForClient)
@@ -122,18 +124,24 @@ public class BusinessDataSourceConfig implements Serializable {
 
 
     public DataSource getDataSource(){
-        HikariConfig hikariConfig = new HikariConfig();
+        try {
+            HikariConfig hikariConfig = new HikariConfig();
 //        hikariConfig.setDriverClassName(this.driverClassName);
-        hikariConfig.setJdbcUrl(this.getUrl());
-        hikariConfig.setUsername(this.getDataSourceUserName());
-        hikariConfig.setPassword(this.getDataSourcePassword());
-        hikariConfig.setMaximumPoolSize(10);
-        hikariConfig.setMinimumIdle(2);
-        hikariConfig.setConnectionTimeout(10000);
-        hikariConfig.setIdleTimeout(60000);
-        hikariConfig.setPoolName(this.getDataSourceId() + "-Business-db-pool");
+            hikariConfig.setJdbcUrl(this.getUrl());
+            hikariConfig.setUsername(this.getDataSourceUserName());
+            hikariConfig.setPassword(this.getDataSourcePassword());
+            hikariConfig.setMaximumPoolSize(10);
+            hikariConfig.setMinimumIdle(2);
+            hikariConfig.setConnectionTimeout(10000);
+            hikariConfig.setIdleTimeout(60000);
+            hikariConfig.setPoolName(this.getDataSourceId() + "-Business-db-pool");
 
-        return new HikariDataSource(hikariConfig);
+            return new HikariDataSource(hikariConfig);
+        } catch (Exception e) {
+            e.printStackTrace();
+            logger.error(" 创建数据源发生异常: DATA_SOURCE_ID： {} -> DATA_SOURCE_ORG：{} ",this.dataSourceId,this.dataSourceOrg);
+            throw new RuntimeException(e);
+        }
     }
 
 
@@ -169,14 +177,14 @@ public class BusinessDataSourceConfig implements Serializable {
 
     }
 
-
-    public SubscriberMappingRegistry getSubscriberMappingRegistry() {
-        return subscriberMappingRegistry;
-    }
-
-    public void setSubscriberMappingRegistry(SubscriberMappingRegistry subscriberMappingRegistry) {
-        this.subscriberMappingRegistry = subscriberMappingRegistry;
-    }
+//
+//    public SubscriberMappingRegistry getSubscriberMappingRegistry() {
+//        return subscriberMappingRegistry;
+//    }
+//
+//    public void setSubscriberMappingRegistry(SubscriberMappingRegistry subscriberMappingRegistry) {
+//        this.subscriberMappingRegistry = subscriberMappingRegistry;
+//    }
 
 
 
@@ -227,7 +235,10 @@ public class BusinessDataSourceConfig implements Serializable {
         public Builder sourceApp(String val) { instance.setSourceApp(val); return this; }
         public Builder dataSourceName(String val) { instance.setDataSourceName(val); return this; }
         public Builder clientId(String val) { instance.setClientId(val); return this; }
-
+        public Builder targetTableNamingRule(Map<String, TargetTableNamingRule>  val) {
+            instance.setTargetTableNamingRule(val);
+            return this;
+        }
         public BusinessDataSourceConfig build() { return instance; }
     }
 
@@ -310,13 +321,13 @@ public class BusinessDataSourceConfig implements Serializable {
         this.schemaList = schemaList;
     }
 
-    public TargetDataSourceConfigRegistry getTargetDataSourceConfigRegistry() {
-        return targetDataSourceConfigRegistry;
-    }
-
-    public void setTargetDataSourceConfigRegistry(TargetDataSourceConfigRegistry targetDataSourceConfigRegistry) {
-        this.targetDataSourceConfigRegistry = targetDataSourceConfigRegistry;
-    }
+//    public TargetDataSourceConfigRegistry getTargetDataSourceConfigRegistry() {
+//        return targetDataSourceConfigRegistry;
+//    }
+//
+//    public void setTargetDataSourceConfigRegistry(TargetDataSourceConfigRegistry targetDataSourceConfigRegistry) {
+//        this.targetDataSourceConfigRegistry = targetDataSourceConfigRegistry;
+//    }
 
 
 //
@@ -355,5 +366,25 @@ public class BusinessDataSourceConfig implements Serializable {
 
     public void setTableMappingConfigBySchema(Map<String, List<TableMappingConfig>> tableMappingConfigBySchema) {
         this.tableMappingConfigBySchema = tableMappingConfigBySchema;
+    }
+
+    public List<SubscriberMapping> getSubscriberMappingList() {
+        return subscriberMappingList;
+    }
+
+    public void setSubscriberMappingList(List<SubscriberMapping> subscriberMappingList) {
+        this.subscriberMappingList = subscriberMappingList;
+    }
+    public Map<String, TargetTableNamingRule> getTargetTableNamingRule() {
+        return this.targetTableNamingRuleMap;
+    }
+
+    public void setTargetTableNamingRule(Map<String, TargetTableNamingRule> targetTableNamingRuleMap) {
+        this.targetTableNamingRuleMap = targetTableNamingRuleMap;
+    }
+
+
+    public TargetTableNamingRule getTargetTableNamingRuleByTargetDataSourceId(String targetDataSourceId) {
+        return this.targetTableNamingRuleMap.get(targetDataSourceId);
     }
 }

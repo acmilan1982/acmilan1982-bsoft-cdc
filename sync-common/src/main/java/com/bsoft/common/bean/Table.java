@@ -16,6 +16,7 @@ public class Table implements Serializable {
     // 所属数据源id,一般是业务库
     private String dataSourceId;
 
+
     private String schemaName;
     private String tableName;
 

@@ -1,7 +1,7 @@
 package com.bsoft.monitor.bootapp;
 
 import com.bsoft.common.config.properties.ClientInfo;
-import com.bsoft.common.config.properties.LogServerInfo;
+
 import com.bsoft.common.config.properties.ServerInfo;
 import org.springframework.boot.SpringApplication;
 import org.springframework.boot.autoconfigure.SpringBootApplication;

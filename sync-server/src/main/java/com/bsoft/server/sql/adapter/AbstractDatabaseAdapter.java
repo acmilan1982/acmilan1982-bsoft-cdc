@@ -10,19 +10,14 @@ package com.bsoft.server.sql.adapter;
  */
 
 
-import java.sql.Connection;
-import java.sql.DriverManager;
-import java.sql.PreparedStatement;
-import java.sql.SQLException;
+
 import java.time.Instant;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.time.ZoneId;
 import java.time.format.DateTimeFormatter;
-import java.util.Calendar;
 import java.util.Date;
-import java.util.Set;
-import java.util.TimeZone;
+
 
 /**
  * Oracle数据库插入策略实现
@@ -79,10 +74,15 @@ public abstract class AbstractDatabaseAdapter implements DatabaseAdapter {
             if (s.isEmpty()) return null;
 
             // 5.1 纯数字：epoch
-            if (isAllDigits(s)) {
+            if (isSignedInteger(s)) {
                 try {
                     long t = Long.parseLong(s);
-                    if (s.length() == 10) t *= 1000L; // 秒 -> 毫秒
+                    int digitLength = getDigitLength(s);
+
+                    // 10 位数字按秒级时间戳处理，其他长度按毫秒级时间戳处理
+                    if (digitLength == 10) {
+                        t *= 1000L;
+                    }
                     return Instant.ofEpochMilli(t).atZone(UTC).format(FMT_DATETIME);
                 } catch (NumberFormatException ignore) {
                     // fall through
@@ -117,13 +117,27 @@ public abstract class AbstractDatabaseAdapter implements DatabaseAdapter {
         return null;
     }
 
-    private boolean isAllDigits(String s) {
-        for (int i = 0; i < s.length(); i++) {
+
+
+    // 判断字符串是否为可选正负号开头的整数
+    private boolean isSignedInteger(String s) {
+        if (s == null || s.isEmpty()) return false;
+
+        // 跳过开头的正负号
+        int start = (s.charAt(0) == '-' || s.charAt(0) == '+') ? 1 : 0;
+        if (start == s.length()) return false;
+
+        // 正负号之后必须全部是数字
+        for (int i = start; i < s.length(); i++) {
             char c = s.charAt(i);
             if (c < '0' || c > '9') return false;
         }
+
         return true;
     }
 
-
+    // 获取去掉正负号后的数字位数
+    private int getDigitLength(String s) {
+        return (s.charAt(0) == '-' || s.charAt(0) == '+') ? s.length() - 1 : s.length();
+    }
 }

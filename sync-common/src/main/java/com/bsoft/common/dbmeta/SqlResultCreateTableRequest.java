@@ -24,6 +24,9 @@ import java.util.List;
 public class SqlResultCreateTableRequest implements Serializable {
 
 
+    // 业务库数据源id
+    private String fromDataSourceId;
+
     // 目标库 dataSourceId
     private String targetDataSourceId;
 
@@ -43,10 +46,12 @@ public class SqlResultCreateTableRequest implements Serializable {
     }
 
 
-    public SqlResultCreateTableRequest(String targetDataSourceId,
+    public SqlResultCreateTableRequest(String fromDataSourceId,
+                                       String targetDataSourceId,
                                        String targetTableName,
                                        List<OracleColumnMetadata> columns,
                                        SimpleClientInfo clientInfo) {
+        this.fromDataSourceId = fromDataSourceId;
         this.targetDataSourceId = targetDataSourceId;
         this.targetTableName = targetTableName;
         this.columns = columns;
@@ -101,15 +106,12 @@ public class SqlResultCreateTableRequest implements Serializable {
         return clientInfo == null ? null : clientInfo.getClientId();
     }
 
-    public TableNamingStrategy getTableNamingStrategy() {
-        return clientInfo == null ? null : clientInfo.getTableNamingStrategy();
+
+    public String getFromDataSourceId() {
+        return fromDataSourceId;
     }
 
-    public String getTableNamePrefix() {
-        return clientInfo == null ? null : clientInfo.getTableNamePrefix();
-    }
-
-    public String getTableNameSuffix() {
-        return clientInfo == null ? null : clientInfo.getTableNameSuffix();
+    public void setFromDataSourceId(String fromDataSourceId) {
+        this.fromDataSourceId = fromDataSourceId;
     }
 }

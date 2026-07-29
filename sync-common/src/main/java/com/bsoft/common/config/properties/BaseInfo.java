@@ -1,9 +1,11 @@
 package com.bsoft.common.config.properties;
 
+import com.bsoft.common.bean.ConfigDataSourceConfig;
 import com.bsoft.common.bean.ZooKeeperConfig;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
 
+import java.io.Serializable;
 import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
 
@@ -12,10 +14,12 @@ import java.time.format.DateTimeFormatter;
  * Package:   com.bsoft.bean
  * Description:
  *
- * @Author: snoopy
- * @Create: 2025/8/15 - 17:55
+ * 说明：
+ * 1. BaseInfo 必须实现 Serializable
+ * 2. 否则子类在 Flink 中被序列化后，父类字段不会被带到 TaskManager 侧
+ * 3. 当前 zooKeeperConfig / ip / serverPort / flinkUiPort 都定义在这里，因此必须可序列化
  */
-public class BaseInfo {
+public class BaseInfo implements Serializable {
 
     // 客户端/服务端的版本号
     protected String version;
@@ -35,6 +39,16 @@ public class BaseInfo {
 
     @Autowired
     protected ZooKeeperConfig zooKeeperConfig;
+
+    // 配置库数据源
+    @Autowired
+    protected ConfigDataSourceConfig configDataSourceConfig;
+
+    /**
+     * SCN 刷新到 ZK 的时间间隔，单位：秒
+     * 默认 60 秒
+     */
+    protected long scnFlushIntervalSeconds = 60L;
 
     // 通知客户端启动，startTime设置为当前时间
     public void notifyClientStart() {
@@ -110,4 +124,25 @@ public class BaseInfo {
     public void setZooKeeperConfig(ZooKeeperConfig zooKeeperConfig) {
         this.zooKeeperConfig = zooKeeperConfig;
     }
+
+    public long getScnFlushIntervalSeconds() {
+        return scnFlushIntervalSeconds;
+    }
+
+    public void setScnFlushIntervalSeconds(long scnFlushIntervalSeconds) {
+        this.scnFlushIntervalSeconds = scnFlushIntervalSeconds;
+    }
+
+
+
+    public ConfigDataSourceConfig getConfigDataSourceConfig() {
+        return configDataSourceConfig;
+    }
+
+    public void setConfigDataSourceConfig(ConfigDataSourceConfig configDataSourceConfig) {
+        this.configDataSourceConfig = configDataSourceConfig;
+    }
+
+
+
 }

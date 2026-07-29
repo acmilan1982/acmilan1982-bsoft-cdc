@@ -1,7 +1,6 @@
 package com.bsoft.pipeline.plan.node;
 
 import com.bsoft.common.pipeline.PlanNodeType;
-import com.bsoft.pipeline.plan.PipelineInitContext;
 import com.bsoft.pipeline.plan.PlanContext;
 import com.bsoft.pipeline.plan.PlanNode;
 import org.apache.flink.table.api.Table;
@@ -15,10 +14,11 @@ public abstract class AbstractPlanNode implements PlanNode {
     protected  List<String> inputs;
     protected  String output;
     protected  Map<String, Object> params;
-    protected final PipelineInitContext initContext;
+    protected  PlanContext planContext;
+
 
     public AbstractPlanNode() {
-        this.initContext = PipelineInitContext.empty();
+
     }
 
     protected AbstractPlanNode(String id,
@@ -26,13 +26,13 @@ public abstract class AbstractPlanNode implements PlanNode {
                                List<String> inputs,
                                String output,
                                Map<String, Object> params,
-                               PipelineInitContext initContext) {
+                               PlanContext planContext) {
         this.id = id;
         this.type = type;
         this.inputs = inputs;
         this.output = output;
         this.params = params;
-        this.initContext = (initContext == null ? PipelineInitContext.empty() : initContext);
+        this.planContext = planContext;
     }
 
     @Override

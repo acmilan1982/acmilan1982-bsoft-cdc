@@ -47,13 +47,32 @@ public class OracleCdcJsonParser  {
                     ddlStatement);
         }
 
+//        if(op.equals("ddl")){
+//            // Kafka 原始 topic
+//            String kafkaTopic = getTextOrNull(root, "kafka_topic");
+//
+//            // Kafka 分区号
+//            Integer kafkaPartition = getIntOrNull(root, "kafka_partition");
+//
+//            // Kafka offset
+//            Long offset = root.get("kafka_offset").asLong();
+//
+//            // 原始消息
+//            String rawMessage = root.get("raw_message").asText();
+//
+//            // DDL 语句
+//            String ddlStatement = root.get("ddl_statement").asText();
+//
+//            // 返回带 Kafka 元数据的 DDL payload
+//            return new KafkaPayload(kafkaTopic, kafkaPartition, offset, op, ddlStatement, rawMessage);
+//        }
 
         // kafka上的原始消息
-        String rawMessage = root.get("raw_message").asText();;
+        String rawMessage = root.get("raw_message").asText();
         // 源库用户名
-        String schemaName = root.get("schema").asText();;
+        String schemaName = root.get("schema").asText();
         // 源库表名
-        String tableName = root.get("table").asText();;
+        String tableName = root.get("table").asText();
         // 当前数据的事务提交时间
         String dmlTime = root.get("dml_time").asText();
         // 当前消息写入kafka的时间
@@ -63,9 +82,10 @@ public class OracleCdcJsonParser  {
         String businessDataSourceId = root.get("business_datasource_id").asText();
         // 消息偏移量
         Long offset = root.get("kafka_offset").asLong();
-
-
-
+        // Kafka 原始 topic，来自 InjectOffsetIntoMessageSchema 注入
+        String kafkaTopic = getTextOrNull(root, "kafka_topic");
+        // Kafka 分区号，当前业务只有 0 分区
+        Integer kafkaPartition = getIntOrNull(root, "kafka_partition");
 
 
 
@@ -127,13 +147,45 @@ public class OracleCdcJsonParser  {
 
         }
 
-        return new KafkaPayload(schemaName,tableName, op,
-                                dmlTime,
-                                kafkaEnqueueTime,
-                                offset,
-                                businessDataSourceId,
-                                beforeMap, afterMap, dateFieldSet,primaryKeySet,rawMessage,
-                                isSnapshotData(root));
+//        return new KafkaPayload(schemaName,tableName, op,
+//                                dmlTime,
+//                                kafkaEnqueueTime,
+//                                offset,
+//                                businessDataSourceId,
+//                                beforeMap, afterMap, dateFieldSet,primaryKeySet,rawMessage,
+//                                isSnapshotData(root));
+
+//        logger.info("offset : {}", offset);
+//        return new KafkaPayload(schemaName,tableName, op,
+//                dmlTime,
+//                kafkaEnqueueTime,
+//                offset,
+//                businessDataSourceId,
+//                beforeMap, afterMap, dateFieldSet,primaryKeySet,rawMessage,
+//                isSnapshotData(root),
+//                isLastSnapshotData(root),
+//                isLastRecordInTable(root));
+
+        // 构造带 Kafka topic 元数据的 DML payload
+        return new KafkaPayload(
+                kafkaTopic,
+                kafkaPartition,
+                schemaName,
+                tableName,
+                op,
+                dmlTime,
+                kafkaEnqueueTime,
+                offset,
+                businessDataSourceId,
+                beforeMap,
+                afterMap,
+                dateFieldSet,
+                primaryKeySet,
+                rawMessage,
+                isSnapshotData(root),
+                isLastSnapshotData(root),
+                isLastRecordInTable(root)
+        );
     }
 
     private static Map<String, Object> convertJsonToMap(JsonNode nodeNode, Set<String> dateFields) throws com.fasterxml.jackson.core.JsonProcessingException {
@@ -190,6 +242,101 @@ public class OracleCdcJsonParser  {
         return "true".equalsIgnoreCase(snapshotValue) || "last".equalsIgnoreCase(snapshotValue);
     }
 
+    /**
+     * 判断是否为快照数据
+     * @param root JSON根节点
+     * @return true表示快照数据,false表示非快照数据
+     */
+    private static boolean isLastSnapshotData(JsonNode root) {
+        JsonNode sourceNode = root.get("source");
+        if (sourceNode == null) {
+            return false;
+        }
 
+        JsonNode snapshotNode = sourceNode.get("snapshot");
+        if (snapshotNode == null || !snapshotNode.isTextual()) {
+            return false;
+        }
+
+        String snapshotValue = snapshotNode.asText();
+
+//        logger.info("snapshotValue : {}", snapshotValue);
+//
+//        if("last".equalsIgnoreCase(snapshotValue)){
+//            return true;
+//        }
+
+
+        // 字符串"true"或"last"表示快照数据,其他都不是
+        return "last".equalsIgnoreCase(snapshotValue);
+    }
+
+    /**
+     * 判断是否为 当前表的最后一条快照数据
+     * @param root JSON根节点
+     * @return true表示快照数据,false表示非快照数据
+     */
+    private static boolean isLastRecordInTable(JsonNode root) {
+        JsonNode sourceNode = root.get("source");
+        if (sourceNode == null) {
+            return false;
+        }
+
+        JsonNode lastRecordInTableNode = sourceNode.get("lastrecordintable");
+        if (lastRecordInTableNode == null || !lastRecordInTableNode.isTextual()) {
+            return false;
+        }
+
+        String lastRecordInTableValue = lastRecordInTableNode.asText();
+
+//        logger.info("snapshotValue : {}", snapshotValue);
+//
+//        if("last".equalsIgnoreCase(snapshotValue)){
+//            return true;
+//        }
+
+
+        // 字符串"true"表示最后一条快照数据,
+        // 字符串"false"表示并非最后一条快照数据,
+        return "true".equalsIgnoreCase(lastRecordInTableValue);
+    }
+
+    // 从 JSON 中读取字符串字段，字段不存在时返回 null
+    private static String getTextOrNull(JsonNode root, String fieldName) {
+        // 空 JSON 直接返回 null
+        if (root == null) {
+            return null;
+        }
+
+        // 获取字段节点
+        JsonNode node = root.get(fieldName);
+
+        // 字段不存在或为 null 时返回 null
+        if (node == null || node.isNull()) {
+            return null;
+        }
+
+        // 返回字符串值
+        return node.asText();
+    }
+
+    // 从 JSON 中读取整数字段，字段不存在时返回 null
+    private static Integer getIntOrNull(JsonNode root, String fieldName) {
+        // 空 JSON 直接返回 null
+        if (root == null) {
+            return null;
+        }
+
+        // 获取字段节点
+        JsonNode node = root.get(fieldName);
+
+        // 字段不存在或为 null 时返回 null
+        if (node == null || node.isNull()) {
+            return null;
+        }
+
+        // 返回整数值
+        return node.asInt();
+    }
 
 }

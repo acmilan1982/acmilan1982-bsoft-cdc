@@ -17,6 +17,9 @@ import java.util.concurrent.ConcurrentHashMap;
 
 public class SqlNodeSchemaRegistry implements Serializable {
 
+    public SqlNodeSchemaRegistry() {
+    }
+
     private final Map<String, OracleColumnsQueryResult> cache = new ConcurrentHashMap<>();
 
     public void register(String planId, String nodeId, OracleColumnsQueryResult result) {

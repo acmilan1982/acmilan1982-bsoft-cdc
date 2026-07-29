@@ -20,6 +20,10 @@ public class OracleSqlColumnsQueryRequest implements Serializable {
 
     // 由哪个 sync-client 执行 SQL 元数据查询
     private String clientId;
+
+    // 业务库
+    private String businessDataSourceId;
+
     // 需要导出列结构的 SQL
     private String sql;
     // SQL 执行上下文 schema（如 SPT_HIS_2023）
@@ -29,6 +33,8 @@ public class OracleSqlColumnsQueryRequest implements Serializable {
     private String targetTableName;
 
     private String sqlNodeId;
+
+
 
     // 目标库 dataSourceId
     private String targetDataSourceId;
@@ -98,5 +104,13 @@ public class OracleSqlColumnsQueryRequest implements Serializable {
 
     public void setSqlNodeId(String sqlNodeId) {
         this.sqlNodeId = sqlNodeId;
+    }
+
+    public String getBusinessDataSourceId() {
+        return businessDataSourceId;
+    }
+
+    public void setBusinessDataSourceId(String businessDataSourceId) {
+        this.businessDataSourceId = businessDataSourceId;
     }
 }

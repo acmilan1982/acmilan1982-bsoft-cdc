@@ -10,18 +10,37 @@ package com.bsoft.common.factory;
  */
 public class TopicNameFactory {
 
+
+    private static final String TOPIC_SEPARATOR = ".";
     private static final String ASSOC_TOPIC_PREFIX = "assoc";
 
     private TopicNameFactory() {
     }
 
-    public static String generateAssocTopic(String tableName, String dataSourceId) {
-        if (tableName == null || tableName.trim().isEmpty()) {
-            throw new IllegalArgumentException("tableName must not be blank");
-        }
-        if (dataSourceId == null || dataSourceId.trim().isEmpty()) {
-            throw new IllegalArgumentException("dataSourceId must not be blank");
-        }
-        return ASSOC_TOPIC_PREFIX + "." + tableName.trim() + "." + dataSourceId.trim();
+    public static String generateTopic(String clientId, String fromDataSourceId,String schemaName, String tableName, String toDataSourceId) {
+
+
+        return join(
+                clientId.trim(),
+                fromDataSourceId.trim(),
+                schemaName.trim(),
+                tableName.trim(),
+                toDataSourceId.trim()
+        );
+    }
+
+    public static String generateAssocTopic(String clientId, String tableName, String dataSourceId) {
+
+
+        return join(
+                ASSOC_TOPIC_PREFIX,
+                clientId.trim(),
+                tableName.trim(),
+                dataSourceId.trim()
+        );
+    }
+
+    private static String join(String... parts) {
+        return String.join(TOPIC_SEPARATOR, parts);
     }
 }

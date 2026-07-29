@@ -17,17 +17,16 @@ import java.util.List;
  * 主题信息工厂类
  * 负责创建 ClientTopicInfo 和 ServerTopicInfo 对象
  */
-@Component
+
 public class TopicInfoFactory {
 
-    @Autowired(required = false)
-    private ClientInfo clientInfo;
+//    @Autowired(required = false)
+//    private ClientInfo clientInfo;
+//
+//    @Autowired(required = false)
+//    private ServerInfo serverInfo;
 
-    @Autowired(required = false)
-    private ServerInfo serverInfo;
-
-    @Autowired
-    private TableNameGenerator tableNameGenerator;
+    private TableNameGenerator tableNameGenerator = new TableNameGenerator();
 
 
     public TopicInfoFactory() {
@@ -39,16 +38,16 @@ public class TopicInfoFactory {
         List<ClientTopicInfo> clientTopicInfoList = new ArrayList<>();
         for (ExecutionPlan.TableExecutionPlan tableExecutionPlan : tableExecutionPlanList) {
             // 生成客户端主题信息
-            clientTopicInfoList.add(generateBasicTopicInfo(clientInfo.getClientId(),tableExecutionPlan));
+            clientTopicInfoList.add(generateBasicTopicInfo(tableExecutionPlan));
         }
         return clientTopicInfoList;
     }
 
 
-    // 生成基本的TopicInfo
-    public ServerTopicInfo generateBasicTopicInfo(String clientId,
-                                                  ExecutionPlan.TableExecutionPlan tableExecutionPlan ) {
+    // 生成基本的TopicInfo，主要包括topic name
+    public ServerTopicInfo generateBasicTopicInfo(ExecutionPlan.TableExecutionPlan tableExecutionPlan ) {
 
+        // ServerTopicInfo是ClientTopicInfo的子类，多一个目标表名
         ServerTopicInfo serverTopicInfo = new ServerTopicInfo();
 
         // 源库DataSourceId
@@ -63,7 +62,7 @@ public class TopicInfoFactory {
         serverTopicInfo.setClientInfo(tableExecutionPlan.getClientInfo());
 
         // 生成主题
-        serverTopicInfo.setTopic(generateTopic(clientId,tableExecutionPlan));
+        serverTopicInfo.setTopic(generateTopic(tableExecutionPlan.getClientId(),tableExecutionPlan));
 
         return serverTopicInfo;
     }
@@ -74,13 +73,16 @@ public class TopicInfoFactory {
 
     // 生成kafka的topic，生成规则是固定的，不可配置
     // 客户端，中心端共用该主题生成模式
-    public String generateTopic(String clientInfo,
+    public String generateTopic(String clientId,
                                 ExecutionPlan.TableExecutionPlan tableExecutionPlan) {
 
-        return  clientInfo + "_" +
-                tableExecutionPlan.getSchemaName() + "_" +
-                tableExecutionPlan.getTableName() + "_" +
-                tableExecutionPlan.getToDataSourceId();
+
+        return TopicNameFactory.generateTopic(
+                clientId,
+                tableExecutionPlan.getFromDataSourceId(),
+                tableExecutionPlan.getSchemaName(),
+                tableExecutionPlan.getTableName(),
+                tableExecutionPlan.getToDataSourceId());
 
     }
 
@@ -120,7 +122,7 @@ public class TopicInfoFactory {
             // 获取 目标库(有且仅有一个)
             TargetDataSourceConfig targetDataSourceConfig = targetDataSourceConfigRegistry.findTargetDataSourceConfigByDataSourceId(toDataSourceId);
 
-            // 生成主题名与目标表名，注意，此处生成的表名，可能不是最后使用的表名
+            // 生成 <主题名> 与 <目标表名>，注意，此处生成的表名，可能不是最后使用的表名
             // TABLE_MERGE，CLIENTID_SCHEMA_TABLE模式，现在就能确定表名
             // TABLE_PREFIX模式，目标表可能需要改名，但此时无法确定是否需要修改，因此只能先生成初始表名，后续再处理
             serverTopicInfoList.add(generateServerTopicInfo(businessDataSourceConfig,
@@ -141,27 +143,23 @@ public class TopicInfoFactory {
     }
 
 
-    // 为客户端的单个执行计划，生成 ServerTopicInfo
+    // 为客户端的单个执行计划，生成 ServerTopicInfo，主要内容是topic name + 目标表名
     public ServerTopicInfo generateServerTopicInfo(BusinessDataSourceConfig businessDataSourceConfig,
                                                    TargetDataSourceConfig targetDataSourceConfig,
                                                    ExecutionPlan.TableExecutionPlan tableExecutionPlan ) {
         // 获取客户端ID
-        String clientId = businessDataSourceConfig.getClientId();
+        TargetTableNamingRule targetTableNamingRule = businessDataSourceConfig.getTargetTableNamingRuleByTargetDataSourceId(targetDataSourceConfig.getDataSourceId());
         // 生成基本的ServerTopicInfo
-        ServerTopicInfo serverTopicInfo = generateBasicTopicInfo(clientId, tableExecutionPlan);
+        ServerTopicInfo serverTopicInfo = generateBasicTopicInfo(tableExecutionPlan);
 
         // 目标表类型
         DatabaseType dataSourceType = targetDataSourceConfig.getDataSourceType();
         // 生成目标表名
-        String targetTableName = generateTargetTableName(clientId,dataSourceType,tableExecutionPlan);
+        String targetTableName = generateTargetTableName(targetTableNamingRule,dataSourceType,tableExecutionPlan);
         // 设置目标表名
         serverTopicInfo.setTargetTableName(targetTableName);
 
         serverTopicInfo.setClientInfo(tableExecutionPlan.getClientInfo());
-
-//        serverTopicInfo.setClientId(tableExecutionPlan.getClientId());
-//        serverTopicInfo.setTableNamingStrategy(tableExecutionPlan.getTableNamingStrategy());
-
 
         return serverTopicInfo;
     }
@@ -169,11 +167,11 @@ public class TopicInfoFactory {
 
 
     // 生成目标表名
-    public String generateTargetTableName(String clientId,                                             // 客户端id
+    public String generateTargetTableName(TargetTableNamingRule targetTableNamingRule,
                                           DatabaseType databaseType,                                   // 目标表类型
                                           ExecutionPlan.TableExecutionPlan tableExecutionPlan) {       // 表级的执行计划
         // 1. 先根据命名策略生成表名
-        String targetTableName = tableNameGenerator.generateTargetTableName(clientId,tableExecutionPlan);
+        String targetTableName = tableNameGenerator.generateTargetTableName(targetTableNamingRule,tableExecutionPlan);
         // 2. 再根据库的类型，选择 表名 大写还是 小写
         return tableNameGenerator.applyDatabaseSpecificFormatting(targetTableName, databaseType);
     }
@@ -183,21 +181,21 @@ public class TopicInfoFactory {
 
 
 
-    public ClientInfo getClientInfo() {
-        return clientInfo;
-    }
-
-    public void setClientInfo(ClientInfo clientInfo) {
-        this.clientInfo = clientInfo;
-    }
-
-    public ServerInfo getServerInfo() {
-        return serverInfo;
-    }
-
-    public void setServerInfo(ServerInfo serverInfo) {
-        this.serverInfo = serverInfo;
-    }
+//    public ClientInfo getClientInfo() {
+//        return clientInfo;
+//    }
+//
+//    public void setClientInfo(ClientInfo clientInfo) {
+//        this.clientInfo = clientInfo;
+//    }
+//
+//    public ServerInfo getServerInfo() {
+//        return serverInfo;
+//    }
+//
+//    public void setServerInfo(ServerInfo serverInfo) {
+//        this.serverInfo = serverInfo;
+//    }
 
     public TableNameGenerator getTableNameGenerator() {
         return tableNameGenerator;

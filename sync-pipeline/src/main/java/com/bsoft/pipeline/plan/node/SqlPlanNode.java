@@ -1,13 +1,9 @@
 package com.bsoft.pipeline.plan.node;
 
 import com.bsoft.common.pipeline.PlanNodeType;
-import com.bsoft.pipeline.functions.SqlFunction;
-import com.bsoft.pipeline.plan.PipelineInitContext;
 import com.bsoft.pipeline.plan.PlanContext;
 import com.bsoft.pipeline.plan.sql.SqlScopeAliasRegistry;
-import org.apache.flink.api.common.typeinfo.Types;
 import org.apache.flink.table.api.Table;
-import org.apache.flink.types.Row;
 
 import java.io.Serializable;
 import java.util.ArrayList;
@@ -16,11 +12,12 @@ import java.util.Map;
 
 public class SqlPlanNode extends AbstractPlanNode implements Serializable {
 
+
     public SqlPlanNode() {
     }
 
-    public SqlPlanNode(String id, List<String> inputs, String output, Map<String, Object> params, PipelineInitContext initContext) {
-        super(id, PlanNodeType.SQL, inputs, output, params, initContext);
+    public SqlPlanNode(String id, List<String> inputs, String output, Map<String, Object> params, PlanContext planContext) {
+        super(id, PlanNodeType.SQL, inputs, output, params, planContext);
     }
 
     @Override
@@ -37,8 +34,8 @@ public class SqlPlanNode extends AbstractPlanNode implements Serializable {
             if (aliasRegistry != null) {
                 Map<String, String> aliasMap = aliasRegistry.findAliases(scopeDsId, scopeSchema);
                 for (Map.Entry<String, String> e : aliasMap.entrySet()) {
-                    String shortName = e.getKey();     // opt_fee
-                    String uniqueView = e.getValue();  // ds1_his_opt_fee
+                    String shortName = e.getKey();
+                    String uniqueView = e.getValue();
                     context.tableEnv().createTemporaryView(shortName, context.tableEnv().from(uniqueView));
                     createdAliases.add(shortName);
                 }
@@ -57,7 +54,7 @@ public class SqlPlanNode extends AbstractPlanNode implements Serializable {
                 }
             }
 
-            return context.tableEnv().sqlQuery(sql); // 只执行一次，不吞异常
+            return context.tableEnv().sqlQuery(sql);
         } finally {
             for (String alias : createdAliases) {
                 context.tableEnv().dropTemporaryView(alias);
@@ -75,6 +72,7 @@ public class SqlPlanNode extends AbstractPlanNode implements Serializable {
         }
         return null;
     }
+
     private String getSql() {
         Object v = params.get("sql");
         if (v == null || String.valueOf(v).trim().isEmpty()) {
@@ -85,5 +83,7 @@ public class SqlPlanNode extends AbstractPlanNode implements Serializable {
         }
         return String.valueOf(v).trim();
     }
+
+
 }
 

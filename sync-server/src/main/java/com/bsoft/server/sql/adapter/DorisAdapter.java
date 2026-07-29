@@ -17,6 +17,7 @@ import java.time.LocalDateTime;
 import java.time.ZoneId;
 import java.time.format.DateTimeFormatter;
 import java.util.Date;
+import java.util.Locale;
 import java.util.Set;
 
 /**
@@ -34,7 +35,7 @@ public class DorisAdapter extends AbstractDatabaseAdapter  {
     public void setParameterValue(PreparedStatement ps, int index, Object value,
                                      String fieldName, Set<String> dateFieldSet) throws SQLException {
         try {
-            if (dateFieldSet.contains(fieldName) && value != null) {
+            if (isDateField(dateFieldSet, fieldName) && value != null) {
                 // 日期字段转换为字符串格式，
                 String formattedValue = fastParseDateForKafka(value);
                 // 处理时间字段格式转换
@@ -51,6 +52,12 @@ public class DorisAdapter extends AbstractDatabaseAdapter  {
             // 异常处理 - 尝试转换为日期
             e.printStackTrace();
         }
+    }
+
+    private boolean isDateField(Set<String> dateFieldSet, String fieldName) {
+        return dateFieldSet != null
+                && fieldName != null
+                && dateFieldSet.contains(fieldName.toLowerCase(Locale.ROOT));
     }
 
 

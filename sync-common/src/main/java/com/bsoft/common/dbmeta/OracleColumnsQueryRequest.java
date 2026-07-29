@@ -19,6 +19,7 @@ import java.util.List;
 public class OracleColumnsQueryRequest implements Serializable {
 
     private String clientId;
+    private String businessDataSourceId;
     private String owner;
     private List<String> tableNames = new ArrayList<>();
 
@@ -45,6 +46,14 @@ public class OracleColumnsQueryRequest implements Serializable {
 
     public void setOwner(String owner) {
         this.owner = owner;
+    }
+
+    public String getBusinessDataSourceId() {
+        return businessDataSourceId;
+    }
+
+    public void setBusinessDataSourceId(String businessDataSourceId) {
+        this.businessDataSourceId = businessDataSourceId;
     }
 
     public List<String> getTableNames() {

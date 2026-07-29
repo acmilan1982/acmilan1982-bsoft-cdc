@@ -1,16 +1,14 @@
 package com.bsoft.client.api;
 
-import com.bsoft.common.bean.BusinessDataSourceConfig;
+import com.bsoft.common.bean.*;
 import com.bsoft.common.config.properties.ClientInfo;
-import com.bsoft.common.bean.TableDDLRequest;
-import com.bsoft.common.bean.TableDDLRequestWrapper;
-import com.bsoft.common.bean.TableMappingConfig;
 import com.bsoft.common.dbmeta.*;
 import com.bsoft.common.dto.TableMappingConfigDTO;
-import com.bsoft.common.global.GlobalZooKeeperManager;
 import com.bsoft.common.http.ApiResponse;
 import com.bsoft.common.http.ErrorCode;
 import com.bsoft.common.util.JsonUtil;
+import com.bsoft.common.zk.ZkClient;
+import com.bsoft.common.zk.ZkClientRegistry;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -43,22 +41,30 @@ public class ClientController {
     private static final Logger logger = LogManager.getLogger(ClientController.class);
 
     private final RestTemplate restTemplate = new RestTemplate();
-    OracleTableMetadataReader oracleTableMetadataReader;
-    private  String  sendTableDDLURL;
-    private  String  serverAliveURL;
-    private  String  url;
-//    private  String  getTableDDLURL;
+//    OracleTableMetadataReader oracleTableMetadataReader;
+    private OracleTableMetadataReaderRegistry oracleTableMetadataReaderRegistry;
+
+    // server 的基础地址
+    private String syncServerBaseUrl;
+    // 用于把单表 DDL/元数据回调给 sync-server
+    private  String tableDdlImportUrl;
+    // 服务端健康检查/存活探测地址
+    private  String serverPingUrl;
+    // 把 SQL 查询结果对应的列元数据回调给 sync-server 建表
+    private  String sqlResultTableImportUrl;
+
 
     private final String  serverIPPath = "/servers/Server001/ip";
+
+    // 服务器IP地址+端口
+    private String serverIP;
     // 客户端信息
     @Autowired
     private ClientInfo clientInfo;
 
-    // 全局 ZooKeeper 节点管理器
-    protected transient GlobalZooKeeperManager globalZooKeeperManager;
+//    private transient ClientZkCoordinator clientZkCoordinator;
 
-    // 服务器IP地址+端口
-    private String serverIP;
+
 
     // 用于存储待处理请求的队列，单表的ddl
     private final BlockingQueue<TableDDLRequest> requestQueue = new LinkedBlockingQueue<>();
@@ -74,16 +80,41 @@ public class ClientController {
     // 关闭标记
     private final AtomicBoolean running = new AtomicBoolean(false);
 
+    /**
+     * 当前 ClientController 使用的共享 ZK 客户端。
+     *
+     * 说明：
+     * 1. 这里只用于读取非 client-process / non-job 的通用 ZK 路径
+     * 2. 例如当前的 server IP 路径：/servers/Server001/ip
+     */
+    private transient ZkClient zkClient;
+
 
     @PostConstruct
     public void init() throws Exception {
-        this.globalZooKeeperManager = GlobalZooKeeperManager.getInstance(clientInfo);
-        String serverIPJsonFormat = globalZooKeeperManager.getNodeData(serverIPPath);
-        serverIP = JsonUtil.jsonToIp(serverIPJsonFormat);
-        serverAliveURL = "http://" + serverIP + "/sync-server/api/ping";
-        sendTableDDLURL = "http://" + serverIP + "/sync-server/api/tables/import";
-        url = "http://" + serverIP + "/sync-server/api/tables/sql-result/import";
-//        getTableDDLURL = "http://" + serverIP + "/sync-server/api/getTableDDL";
+//        this.globalZooKeeperManager = GlobalZooKeeperManager.getInstance(clientInfo);
+//        String serverIPJsonFormat = globalZooKeeperManager.getNodeData(serverIPPath);
+
+
+
+        // 通过共享注册表获取当前 JVM 内可复用的 ZkClient。
+        this.zkClient = ZkClientRegistry.acquire(clientInfo.getZooKeeperConfig());
+
+
+        // 直接读取 server IP 节点。
+        // 当前路径不属于 client process / client job 语义，因此不走 ClientProcessZkService / ClientJobZkService。
+        String serverIPJsonFormat = zkClient.getString(serverIPPath);
+        if (serverIPJsonFormat == null || serverIPJsonFormat.trim().isEmpty()) {
+            logger.info("无法从 {} 获取中心端的ip值,中心端可能未上线，但不影响当前探针", serverIPPath);
+        }else{
+            serverIP = JsonUtil.jsonToIp(serverIPJsonFormat);
+            syncServerBaseUrl = "http://" + serverIP + "/sync-server/api";
+            serverPingUrl = syncServerBaseUrl + "/ping";
+            tableDdlImportUrl = syncServerBaseUrl + "/tables/import";
+            sqlResultTableImportUrl = syncServerBaseUrl + "/tables/sql-result/import";
+        }
+
+
 
         // 启动处理线程
         startWorkers();
@@ -124,6 +155,15 @@ public class ClientController {
         joinQuietly(sqlColumnsWorkerThread, 5000);
 
         logger.info("ClientController workers stopped.");
+
+        try {
+            if (zkClient != null) {
+                ZkClientRegistry.release(clientInfo.getZooKeeperConfig());
+                zkClient = null;
+            }
+        } catch (Exception e) {
+            logger.warn("Failed to release shared ZkClient in ClientController shutdown", e);
+        }
     }
 
     private void joinQuietly(Thread t, long millis) {
@@ -138,8 +178,8 @@ public class ClientController {
 
 
 
-    public void initializeMetadataReader(BusinessDataSourceConfig businessDataSourceConfig) {
-        this.oracleTableMetadataReader = new OracleTableMetadataReader(businessDataSourceConfig);
+    public void initializeMetadataReader(BusinessDataSourceConfigRegistry businessDataSourceConfigRegistry) {
+        this.oracleTableMetadataReaderRegistry = new OracleTableMetadataReaderRegistry(businessDataSourceConfigRegistry);
     }
 
 
@@ -215,6 +255,8 @@ public class ClientController {
     @PostMapping("/tables/columns/query")
     private ResponseEntity<OracleColumnsQueryResult> queryTableColumns(@RequestBody OracleColumnsQueryRequest oracleColumnsQueryRequest) {
         try {
+
+            OracleTableMetadataReader oracleTableMetadataReader = this.oracleTableMetadataReaderRegistry.getOracleTableMetadataReader(oracleColumnsQueryRequest.getBusinessDataSourceId());
             OracleColumnsQueryResult oracleColumnsQueryResult = oracleTableMetadataReader.queryColumnsByOwnerAndTables(oracleColumnsQueryRequest);
             return ResponseEntity.ok(oracleColumnsQueryResult);
 
@@ -249,10 +291,10 @@ public class ClientController {
 
     // 同步：立即查询并返回结果（给 sync-pipeline 用）
     @PostMapping("/tables/sql-columns/query")
-    private ResponseEntity<ApiResponse<OracleColumnsQueryResult>> queryColumnsBySqlSync(
-            @RequestBody OracleSqlColumnsQueryRequest request) {
+    private ResponseEntity<ApiResponse<OracleColumnsQueryResult>> queryColumnsBySqlSync(@RequestBody OracleSqlColumnsQueryRequest request) {
         String traceId = UUID.randomUUID().toString();
         try {
+            OracleTableMetadataReader oracleTableMetadataReader = this.oracleTableMetadataReaderRegistry.getOracleTableMetadataReader(request.getBusinessDataSourceId());
             OracleColumnsQueryResult result = oracleTableMetadataReader.queryColumnsBySql(request);
             return ResponseEntity.ok(ApiResponse.ok(result, traceId));
         } catch (Exception e) {
@@ -306,7 +348,8 @@ public class ClientController {
         tableMappingConfig.setTableName(tableDDLRequest.getTableName());
 
         // 获取单表的ddl，设置到 TableMappingConfig
-        oracleTableMetadataReader.getSingleTableMetadata(tableMappingConfig);
+        oracleTableMetadataReaderRegistry.getOracleTableMetadataReader(tableDDLRequest.getBusinessDataSourceId())
+                                         .getSingleTableMetadata(tableMappingConfig);
 
         List<TableMappingConfigDTO> dtoList =
                 TableMappingConfigDTO.fromList(Collections.singletonList(tableMappingConfig));
@@ -317,7 +360,7 @@ public class ClientController {
         TableDDLRequestWrapper wrapper = new TableDDLRequestWrapper(tableDDLRequest, dtoList);
         HttpEntity<TableDDLRequestWrapper> httpReq = new HttpEntity<>(wrapper, buildJsonHeaders());
 
-        ResponseEntity<String> response = restTemplate.postForEntity(sendTableDDLURL, httpReq, String.class);
+        ResponseEntity<String> response = restTemplate.postForEntity(tableDdlImportUrl, httpReq, String.class);
         logger.info("DDL回调响应: {}", response.getBody());
     }
 
@@ -325,7 +368,8 @@ public class ClientController {
     // 自定义 SQL 串行处理核心：查元数据 -> 回调 sync-server 建表 =====
     private void handleSqlColumnsRequest(OracleSqlColumnsQueryRequest req) throws Exception {
         // 1) 查询 SQL 结果字段元数据
-        OracleColumnsQueryResult result = oracleTableMetadataReader.queryColumnsBySql(req);
+        OracleColumnsQueryResult result = oracleTableMetadataReaderRegistry.getOracleTableMetadataReader(req.getBusinessDataSourceId())
+                       .queryColumnsBySql(req);
         if (result == null || result.getColumns() == null || result.getColumns().isEmpty()) {
             throw new IllegalStateException("SQL 元数据为空, targetTable=" + req.getTargetTableName());
         }
@@ -341,7 +385,7 @@ public class ClientController {
         // 3) 回调 sync-server 建表接口（保持串行）
 
         HttpEntity<SqlResultCreateTableRequest> httpReq = new HttpEntity<>(createReq, buildJsonHeaders());
-        ResponseEntity<String> resp = restTemplate.postForEntity(url, httpReq, String.class);
+        ResponseEntity<String> resp = restTemplate.postForEntity(sqlResultTableImportUrl, httpReq, String.class);
 
         logger.info("sql-result回调响应: {}", resp.getBody());
     }

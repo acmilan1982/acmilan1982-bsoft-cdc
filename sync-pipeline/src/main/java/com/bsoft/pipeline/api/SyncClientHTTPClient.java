@@ -7,6 +7,7 @@ import com.bsoft.common.dbmeta.OracleSqlColumnsQueryRequest;
 import com.bsoft.common.global.GlobalZooKeeperManager;
 import com.bsoft.common.http.AbstractHTTPClient;
 import com.bsoft.common.http.ApiResponse;
+import com.bsoft.common.zk.ZkClientRegistry;
 import org.springframework.core.ParameterizedTypeReference;
 import org.springframework.http.HttpEntity;
 import org.springframework.http.HttpHeaders;
@@ -37,18 +38,20 @@ public class SyncClientHTTPClient extends AbstractHTTPClient {
 
     @PostConstruct
     public void init() throws Exception {
-        this.globalZooKeeperManager = GlobalZooKeeperManager.getInstance(pipeLineInfo);
+        this.zkClient = ZkClientRegistry.acquire(this.pipeLineInfo.getZooKeeperConfig());
     }
 
     /**
      * Query table columns metadata only (no landing).
      */
-    public OracleColumnsQueryResult getTableSchema(String clientId, OracleColumnsQueryRequest request) throws Exception {
+    public OracleColumnsQueryResult getTableSchema(OracleColumnsQueryRequest request) throws Exception {
         if (request == null) {
             throw new IllegalArgumentException("request must not be null");
         }
 
-        String normalizedClientId = normalizeClientId(clientId);
+        // 获取clientid
+        String normalizedClientId = normalizeClientId(request.getClientId());
+        // 获取客户端地址，
         String clientIP = resolveClientIP(normalizedClientId);
         HttpEntity<OracleColumnsQueryRequest> httpRequest = new HttpEntity<>(request, buildJsonHeaders());
 

@@ -1,5 +1,6 @@
 package com.bsoft.common.bean;
 
+import com.bsoft.common.config.properties.PipeLineInfo;
 import com.bsoft.common.config.properties.ServerInfo;
 import com.bsoft.common.config.properties.SimpleClientInfo;
 import com.bsoft.common.enums.TableNamingStrategy;
@@ -40,6 +41,8 @@ public class SubscriberMapping implements Serializable {
 
 
     private  ServerInfo serverInfo;
+
+    private PipeLineInfo pipeLineInfo;
 
 
 
@@ -188,17 +191,17 @@ public class SubscriberMapping implements Serializable {
         return this.clientInfo.getClientId();
     }
 
-    public TableNamingStrategy getTableNamingStrategy() {
-        return this.clientInfo.getTableNamingStrategy();
-    }
-
-    public String getTableNamePrefix() {
-        return this.clientInfo.getTableNamePrefix();
-    }
-
-    public String getTableNameSuffix() {
-        return this.clientInfo.getTableNameSuffix();
-    }
+//    public TableNamingStrategy getTableNamingStrategy() {
+//        return this.clientInfo.getTableNamingStrategy();
+//    }
+//
+//    public String getTableNamePrefix() {
+//        return this.clientInfo.getTableNamePrefix();
+//    }
+//
+//    public String getTableNameSuffix() {
+//        return this.clientInfo.getTableNameSuffix();
+//    }
 
     public SimpleClientInfo getClientInfo() {
         return clientInfo;
@@ -206,6 +209,14 @@ public class SubscriberMapping implements Serializable {
 
     public void setClientInfo(SimpleClientInfo clientInfo) {
         this.clientInfo = clientInfo;
+    }
+
+    public PipeLineInfo getPipeLineInfo() {
+        return pipeLineInfo;
+    }
+
+    public void setPipeLineInfo(PipeLineInfo pipeLineInfo) {
+        this.pipeLineInfo = pipeLineInfo;
     }
 }
 

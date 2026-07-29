@@ -21,12 +21,6 @@ import org.springframework.stereotype.Component;
 public class PipelineJobDispatcher implements CommandLineRunner {
     private static final Logger logger = LogManager.getLogger(PipelineJobDispatcher.class);
 
-
-    // 服务端信息
-    @Autowired
-    private ServerInfo serverInfo;
-
-
     @Autowired
     private KafkaPipeline kafkaPipeline;
 
@@ -73,11 +67,4 @@ public class PipelineJobDispatcher implements CommandLineRunner {
     }
 
 
-    public ServerInfo getServerInfo() {
-        return serverInfo;
-    }
-
-    public void setServerInfo(ServerInfo serverInfo) {
-        this.serverInfo = serverInfo;
-    }
 }

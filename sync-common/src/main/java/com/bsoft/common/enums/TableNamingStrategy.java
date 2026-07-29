@@ -11,13 +11,16 @@ package com.bsoft.common.enums;
 public enum TableNamingStrategy {
     // 使用源表名，同名表合并到一个目标表
     TABLE_MERGE("TABLE_MERGE"),
-    // 使用源表名，同名冲突时加前缀区分
-    TABLE_PREFIX("TABLE_PREFIX"),
-    // 探针ID_用户_表名，全局唯一表名，绝对不会冲突
-    CLIENTID_SCHEMA_TABLE("CLIENTID_SCHEMA_TABLE"),
 
-    // 自定义前缀，用户自定义前缀
-    CUSTOM_PREFIX("CUSTOM_PREFIX"); // 新增
+    // 用户自定义前缀后缀，同名表合并到一个目标表
+    CUSTOM_PREFIX_SUFFIX("CUSTOM_PREFIX_SUFFIX"),
+
+    // 使用源表名，同名冲突时加前缀区分，
+    PREFIX_ON_CONFLICT("PREFIX_ON_CONFLICT"),
+
+    // 探针ID_用户_表名，全局唯一表名，绝对不会冲突
+    CLIENTID_SCHEMA_TABLE("CLIENTID_SCHEMA_TABLE");
+
 
 
     private final String code;

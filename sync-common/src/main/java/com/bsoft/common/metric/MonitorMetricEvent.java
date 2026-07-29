@@ -51,6 +51,19 @@ public class MonitorMetricEvent implements Serializable {
         this.value = value;
     }
 
+    public MonitorMetricEvent(String metricType,
+                              String serverId,
+                              String topic,
+                              String targetDataSourceId,
+                              String targetTableName,
+                              long value) {
+//        this.metricType = metricType;
+        this.serverId = serverId;
+        this.topic = topic;
+        this.targetDataSourceId = targetDataSourceId;
+        this.targetTableName = targetTableName;
+        this.value = value;
+    }
     public static MonitorMetricEvent offsetEvent(String serverId,
                                                  String topic,
                                                  String targetDataSourceId,

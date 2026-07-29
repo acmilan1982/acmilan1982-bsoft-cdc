@@ -59,7 +59,7 @@ public abstract class AbstractInsertStrategy  implements  InsertStrategy{
 
 
     @Override
-    public Map<Long, String> executeBatchInsert(String tableName,
+    public Map<Long, String>    executeBatchInsert(String tableName,
                                                 List<BatchInsertItem> batchItems,
                                                 BatchSizeManager batchSizeManager,
                                                 List<ColumnInfo> allColumns,
@@ -68,7 +68,7 @@ public abstract class AbstractInsertStrategy  implements  InsertStrategy{
         if (batchItems.isEmpty()) {
             return Collections.emptyMap();
         }
-        // ✅ 记录开始时间
+        // 记录开始时间
         long methodStartTime = System.currentTimeMillis();
 
         // 使用第一条数据的字段结构
@@ -316,7 +316,7 @@ public abstract class AbstractInsertStrategy  implements  InsertStrategy{
 
         try (Connection conn = this.dataSourceHolder.getDataSource().getConnection();
              PreparedStatement ps = conn.prepareStatement(sql)) {
-            logger.info("afterData: {}", afterData);
+//            logger.info("afterData: {}", afterData);
             // 设置参数
             setParameters(ps, insertData, fieldList, dateFieldSet);
 
@@ -528,7 +528,7 @@ public abstract class AbstractInsertStrategy  implements  InsertStrategy{
             if (sourceKey == null || sourceKey.trim().isEmpty()) {
                 continue;
             }
-
+            
             // 表中的实际字段名
             String actualColumnName = targetColumnCaseMap.get(sourceKey.toLowerCase(Locale.ROOT));
             if (actualColumnName == null) {
