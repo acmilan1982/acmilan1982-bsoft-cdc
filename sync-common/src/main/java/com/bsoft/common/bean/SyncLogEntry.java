@@ -2,6 +2,7 @@ package com.bsoft.common.bean;
 
 
 import com.bsoft.common.util.DateFormatUtils;
+import com.bsoft.common.util.IdGenerateUtil;
 
 import java.time.LocalDateTime;
 
@@ -10,7 +11,7 @@ import java.time.LocalDateTime;
  */
 public class SyncLogEntry {
     /** 主键 */
-    public String cdcLogId;
+    public long cdcLogId;
     /** 指令类型：c=新增，u=更新，d=删除 */
     public String instructionType;
     /** LOGMNR挖掘到源数据的时间 */
@@ -126,7 +127,7 @@ public class SyncLogEntry {
          * 构建SyncLogEntry对象，自动填充主键与insertTime
          */
         public SyncLogEntry build() {
-            entry.cdcLogId = java.util.UUID.randomUUID().toString().replace("-", "");
+            entry.cdcLogId = IdGenerateUtil.nextId();
 //            if (entry.insertTime == null) {
 //                entry.insertTime = LocalDateTime.now();
 //            }
@@ -135,11 +136,11 @@ public class SyncLogEntry {
     }
 
 
-    public String getCdcLogId() {
+    public long getCdcLogId() {
         return cdcLogId;
     }
 
-    public void setCdcLogId(String cdcLogId) {
+    public void setCdcLogId(long cdcLogId) {
         this.cdcLogId = cdcLogId;
     }
 

@@ -1,5 +1,5 @@
 client-info:
-  clientId: hosp-006
+  clientId: hosp-012
       # 每个客户端的唯一标识，必须是唯一的,一旦设置后不能修改，因为与flink的检查点id相关，万一clientId变了，
                               # 会导致检查点无法恢复，建议使用医院编号或其他唯一标识符
   version: 1.0

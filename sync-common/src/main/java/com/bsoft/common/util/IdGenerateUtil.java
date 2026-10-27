@@ -18,6 +18,7 @@ public final class IdGenerateUtil {
     private static final long DATACENTER_ID_BITS = 5L;
 
     /** sequence占用位数。 */
+
     private static final long SEQUENCE_BITS = 12L;
 
     /** workerId最大值。 */

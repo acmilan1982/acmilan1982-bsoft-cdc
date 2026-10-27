@@ -15,10 +15,7 @@ import com.bsoft.client.state.JdbcDataSourceRunStateRepository;
 import com.bsoft.common.bean.*;
 import com.bsoft.common.config.properties.SimpleClientInfo;
 import com.bsoft.common.core.CDCJob;
-import com.bsoft.common.enums.JobStartupMode;
-import com.bsoft.common.enums.JobStatus;
-import com.bsoft.common.enums.KafkaWriteMode;
-import com.bsoft.common.enums.TableStatus;
+import com.bsoft.common.enums.*;
 import com.bsoft.common.service.TopicInfoService;
 import com.bsoft.common.util.DatasourceConfigFetcher;
 import com.bsoft.common.util.JobIdUtil;
@@ -781,30 +778,58 @@ public class OracleToKafka extends CDCJob {
 
 
 
-             // SNAPSHOT 模式且启用自动清理时，执行删除并重建 topic 的完整流程。
+//             // SNAPSHOT 模式且启用自动清理时，执行删除并重建 topic 的完整流程。
+//            if (startupMode == JobStartupMode.SNAPSHOT && clientInfo.isCleanTopicsBeforeSnapshot()) {
+//                // 记录当前业务库即将执行 Kafka topic 重建。
+//                logger.warn("SNAPSHOT 模式且启用自动清理，将删除并重建 Kafka topics. clientId={}, dataSourceId={}, topicCount={}",
+//                        clientInfo.getClientId(),
+//                        dataSourceId,
+//                        topicInfos.size());
+//
+//                // 危险操作执行前倒计时。
+//                // 倒计时期间只输出日志，不做交互式确认；如果发现配置或目标 topic 异常，可以手动终止当前进程。
+//                DangerousOperationCountdown.beforeRecreateKafkaTopics(
+//                        clientInfo,
+//                        dataSourceId,
+//                        topicInfos
+//                );
+//
+//                // 删除当前业务库对应 topics，并持续重试直到这些 topics 可以重新创建。
+//                kafkaUtils.recreateKafkaTopicsForSnapshot(
+//                        topicInfos,
+//                        clientInfo.getCleanTopicsBeforeSnapshotTimeoutMinutes(),
+//                        clientInfo.getCleanTopicsBeforeSnapshotRetryIntervalSeconds()
+//                );
+//            } else {
+//                // 非自动清理场景只保证 topic 存在。
+//                kafkaUtils.createKafkaTopicsIfNotExists(topicInfos);
+//            }
+
+
+            // SNAPSHOT 模式且启用自动清理时，根据配置选择清理方式
             if (startupMode == JobStartupMode.SNAPSHOT && clientInfo.isCleanTopicsBeforeSnapshot()) {
-                // 记录当前业务库即将执行 Kafka topic 重建。
-                logger.warn("SNAPSHOT 模式且启用自动清理，将删除并重建 Kafka topics. clientId={}, dataSourceId={}, topicCount={}",
+                // 解析 topic 清理方式
+                KafkaTopicCleanMode cleanMode = clientInfo.resolveCleanTopicsBeforeSnapshotMode();
+
+                // 记录当前业务库即将执行 Kafka topic 清理
+                logger.warn("SNAPSHOT模式，且启用自动清理 Kafka topics，clientId={}, dataSourceId={}, 清理模式={}, topicCount={}",
                         clientInfo.getClientId(),
                         dataSourceId,
+                        cleanMode == KafkaTopicCleanMode.CLEAR_DATA ? "清空 Kafka topic 数据并保留 topics" : "只删除topic数据，不删除topic\"",
                         topicInfos.size());
 
-                // 危险操作执行前倒计时。
-                // 倒计时期间只输出日志，不做交互式确认；如果发现配置或目标 topic 异常，可以手动终止当前进程。
-                DangerousOperationCountdown.beforeRecreateKafkaTopics(
+                // 危险操作执行前倒计时
+                DangerousOperationCountdown.beforeCleanKafkaTopics(
                         clientInfo,
                         dataSourceId,
-                        topicInfos
+                        topicInfos,
+                        cleanMode
                 );
 
-                // 删除当前业务库对应 topics，并持续重试直到这些 topics 可以重新创建。
-                kafkaUtils.recreateKafkaTopicsForSnapshot(
-                        topicInfos,
-                        clientInfo.getCleanTopicsBeforeSnapshotTimeoutMinutes(),
-                        clientInfo.getCleanTopicsBeforeSnapshotRetryIntervalSeconds()
-                );
+                // 根据清理方式执行 topic 清理
+                cleanKafkaTopicsBeforeSnapshot(topicInfos, cleanMode);
             } else {
-                // 非自动清理场景只保证 topic 存在。
+                // 非自动清理场景只保证 topic 存在
                 kafkaUtils.createKafkaTopicsIfNotExists(topicInfos);
             }
 
@@ -820,6 +845,33 @@ public class OracleToKafka extends CDCJob {
             // 按 dataSourceId 保存 runtime
             runtimeByDataSourceId.put(dataSourceId, runtime);
         }
+    }
+
+    // SNAPSHOT 启动前按配置清理 Kafka topics
+    private void cleanKafkaTopicsBeforeSnapshot(List<ClientTopicInfo> topicInfos,
+                                                KafkaTopicCleanMode cleanMode) {
+        // 删除并重建 topic
+        if (cleanMode == KafkaTopicCleanMode.RECREATE_TOPIC) {
+            kafkaUtils.recreateKafkaTopicsForSnapshot(
+                    topicInfos,
+                    clientInfo.getCleanTopicsBeforeSnapshotTimeoutMinutes(),
+                    clientInfo.getCleanTopicsBeforeSnapshotRetryIntervalSeconds()
+            );
+            return;
+        }
+
+        // 保留 topic，仅清除 topic 数据
+        if (cleanMode == KafkaTopicCleanMode.CLEAR_DATA) {
+            kafkaUtils.clearKafkaTopicDataForSnapshot(
+                    topicInfos,
+                    clientInfo.getCleanTopicsBeforeSnapshotTimeoutMinutes(),
+                    clientInfo.getCleanTopicsBeforeSnapshotRetryIntervalSeconds()
+            );
+            return;
+        }
+
+        // 未知清理方式直接失败
+        throw new IllegalStateException("Unsupported Kafka topic clean mode: " + cleanMode);
     }
 
     /**
@@ -876,14 +928,13 @@ public class OracleToKafka extends CDCJob {
     }
 
 
-    /**
-     * 启动所有业务库对应的 Flink Job
-     */
+    // 启动所有业务库对应的 Flink job。
     private void startAllDataSourceJobs() throws Exception {
+        // 逐个启动当前客户端持有的 dataSource runtime。
         for (ClientJobRuntime runtime : runtimeByDataSourceId.values()) {
-            startSingleDataSourceJob(runtime);
+            // 首次启动需要清空历史 scn，避免旧运行态残留。
+            startSingleDataSourceJob(runtime, JobLaunchMode.INITIAL_START);
         }
-
     }
 
 
@@ -912,15 +963,30 @@ public class OracleToKafka extends CDCJob {
      * 9. 将当前 job 提交到共享 MiniCluster
      * 10. 提交成功后写入当前 job 的运行状态
      */
-    public void startSingleDataSourceJob(ClientJobRuntime runtime) throws Exception {
+    public void startSingleDataSourceJob(ClientJobRuntime runtime, JobLaunchMode launchMode) throws Exception {
+        // 启动场景不能为空，避免 scn 清理策略不明确。
+        if (launchMode == null) {
+            throw new IllegalArgumentException("JobLaunchMode cannot be null");
+        }
+
+        // 获取当前业务库配置。
         BusinessDataSourceConfig businessDataSourceConfig = runtime.getBusinessDataSourceConfig();
+
+        // 获取当前业务库 ID。
         String dataSourceId = businessDataSourceConfig.getDataSourceId();
+
+        // 获取当前业务库机构名称。
         String dataSourceOrg = businessDataSourceConfig.getDataSourceOrg();
 
-        logger.info("数据源 -----> {},{} 开始采集", dataSourceId, dataSourceOrg);
+        // 记录当前 job 启动场景。
+        logger.info("数据源 -----> {},{} 开始采集, launchMode={}, clearScnBeforeStart={}",
+                dataSourceId,
+                dataSourceOrg,
+                launchMode,
+                launchMode.isClearScnBeforeStart());
 
-        // 初始化当前业务库自己的 job 级 ZK 节点，并写入业务库机构名称。
-        initJobLevelZkNodes(dataSourceId, dataSourceOrg);
+        // 初始化当前业务库自己的 job 级 ZK 节点，并按启动场景决定是否清空 scn。
+        initJobLevelZkNodes(dataSourceId, dataSourceOrg, launchMode);
 
         // 2. 生成当前业务库自己的 jobId
         String jobIdHex = buildJobId(dataSourceId);
@@ -969,6 +1035,12 @@ public class OracleToKafka extends CDCJob {
                 businessDataSourceConfig.getDataSourceServiceName(),
                 dataSourceId);
 
+        for (int i = 5; i > 0; i--) {
+            System.out.println("倒计时：" + i + " 秒");
+            Thread.sleep(1000);
+        }
+        System.out.println("倒计时结束");
+
         SourceFunction<String> oracleSource = OracleSource.<String>builder()
                 // 设置 Oracle 主机。
                 .hostname(businessDataSourceConfig.getDataSourceHost())
@@ -987,6 +1059,7 @@ public class OracleToKafka extends CDCJob {
 //                .startupOptions(StartupOptions.initial())
                 // 设置启动模式。
                 .startupOptions(startupOptions)
+
                 // 设置 Oracle CDC 指定启动位点。
                 .specificStartupOffset(
                         kafkaStartupOffset == null ? null : kafkaStartupOffset.getScn(),
@@ -1690,13 +1763,13 @@ public class OracleToKafka extends CDCJob {
     }
 
     // 初始化当前业务库对应的 job 级 ZK 运行态。
-    private void initJobLevelZkNodes(String dataSourceId, String dataSourceOrg) throws Exception {
-        // 打开当前业务库 job 级 ZK 服务，并传入业务库机构名称。
+    private void initJobLevelZkNodes(String dataSourceId, String dataSourceOrg, JobLaunchMode launchMode) throws Exception {
+        // 打开当前业务库 job 级 ZK 服务。
         ClientJobZkService jobZkService = ClientJobZkService.open(clientInfo, dataSourceId, dataSourceOrg);
 
         try {
-            // 准备 job 运行态节点并清理旧运行态数据。
-            jobZkService.prepareJobRuntimeState();
+            // 按启动场景准备 job 运行态节点，首次启动清空 scn，失败重启保留 scn。
+            jobZkService.prepareJobRuntimeState(launchMode);
         } finally {
             // 释放 job 级 ZK 服务引用。
             jobZkService.close();

@@ -388,8 +388,8 @@ public class KafkaUtils {
                     logger.info("发现 Topic: {} 已存在，退出检查。 ",topicName);
                     break;
                 } else {
-                    logger.info(" Topic: {} 不存在，等待 5 秒后重试... ",topicName);
-                    Thread.sleep(5000);
+                    logger.info(" Topic: {} 不存在，等待 60 秒后重试... ",topicName);
+                    Thread.sleep(60000);
                     System.out.println(".................................");
                 }
             } catch (InterruptedException | ExecutionException e) {
@@ -906,6 +906,207 @@ public class KafkaUtils {
 
 
 
+
+
+
+    // SNAPSHOT 重跑前仅清除 Kafka topic 数据，不删除 topic 本身
+    public void clearKafkaTopicDataForSnapshot(List<ClientTopicInfo> clientTopicInfoList,
+                                               long timeoutMinutes,
+                                               long retryIntervalSeconds) {
+        // 空 topic 信息不需要处理
+        if (clientTopicInfoList == null || clientTopicInfoList.isEmpty()) {
+            return;
+        }
+
+        // 提取 topic 名称
+        List<String> topics = clientTopicInfoList.stream()
+                .map(ClientTopicInfo::getTopic)
+                .collect(Collectors.toList());
+
+        // 复用字符串集合版本
+        clearKafkaTopicDataForSnapshot(topics, timeoutMinutes, retryIntervalSeconds);
+    }
+
+    // SNAPSHOT 重跑前仅清除 Kafka topic 数据，不删除 topic 本身
+    public void clearKafkaTopicDataForSnapshot(Collection<String> topics,
+                                               long timeoutMinutes,
+                                               long retryIntervalSeconds) {
+        // 规范化 topic 名称
+        List<String> topicNames = normalizeTopicNames(topics);
+
+        // 没有有效 topic 时直接返回
+        if (topicNames.isEmpty()) {
+            return;
+        }
+
+        // 计算整体超时时间
+        long timeoutMillis = TimeUnit.MINUTES.toMillis(Math.max(timeoutMinutes, 1L));
+
+        // 计算重试间隔
+        long retryIntervalMillis = TimeUnit.SECONDS.toMillis(Math.max(retryIntervalSeconds, 1L));
+
+        // 创建 Kafka AdminClient 配置
+        Properties props = new Properties();
+        props.put("bootstrap.servers", KAFKA_BOOTSTRAP_SERVERS);
+
+        // 使用局部 AdminClient 执行本次清理
+        try (AdminClient adminClient = AdminClient.create(props)) {
+            // 清数据前先确保 topic 存在
+            createKafkaTopicsIfNotExistsInternal(topicNames);
+
+            // 等待 topic 可描述
+            waitUntilTopicsDescribable(adminClient, topicNames, 60_000L);
+
+            // 构建每个分区需要删除到的 offset
+            Map<TopicPartition, Long> targetOffsets = resolveLatestOffsets(adminClient, topicNames);
+
+            // 没有可清理分区时直接返回
+            if (targetOffsets.isEmpty()) {
+                return;
+            }
+
+            // 执行 deleteRecords 清理 topic 数据
+            deleteRecordsToOffsets(adminClient, targetOffsets);
+
+            // 等待 earliest offset 推进到目标 offset
+            waitUntilRecordsDeleted(adminClient, targetOffsets, timeoutMillis, retryIntervalMillis);
+
+            // 记录清理完成日志
+            logger.warn("SNAPSHOT模式，Kafka topic 数据清理完成，保留 topic 本身. topicCount={}", topicNames.size());
+        } catch (Exception e) {
+            // Kafka Admin 异常统一包装
+            throw new RuntimeException("Kafka topic 数据清理失败", e);
+        }
+    }
+
+    // 查询指定 topics 所有分区的 latest offset
+    private Map<TopicPartition, Long> resolveLatestOffsets(AdminClient adminClient,
+                                                           Collection<String> topics) throws Exception {
+        // 初始化查询请求
+        Map<TopicPartition, OffsetSpec> latestOffsetQueries = new LinkedHashMap<>();
+
+        // 遍历 topic 获取分区信息
+        for (String topic : topics) {
+            // 查询 topic 描述
+            TopicDescription description = adminClient.describeTopics(Collections.singletonList(topic))
+                    .allTopicNames()
+                    .get(30, TimeUnit.SECONDS)
+                    .get(topic);
+
+            // 为每个分区构造 latest offset 查询
+            description.partitions().forEach(partitionInfo -> {
+                TopicPartition topicPartition = new TopicPartition(topic, partitionInfo.partition());
+                latestOffsetQueries.put(topicPartition, OffsetSpec.latest());
+            });
+        }
+
+        // 没有分区时返回空结果
+        if (latestOffsetQueries.isEmpty()) {
+            return Collections.emptyMap();
+        }
+
+        // 查询 latest offset
+        Map<TopicPartition, ListOffsetsResult.ListOffsetsResultInfo> latestOffsetResults =
+                adminClient.listOffsets(latestOffsetQueries).all().get(30, TimeUnit.SECONDS);
+
+        // 转换为目标 offset 映射
+        Map<TopicPartition, Long> targetOffsets = new LinkedHashMap<>();
+        latestOffsetResults.forEach((topicPartition, offsetInfo) ->
+                targetOffsets.put(topicPartition, offsetInfo.offset()));
+
+        // 返回目标 offset
+        return targetOffsets;
+    }
+
+    // 删除每个分区目标 offset 之前的数据
+    private void deleteRecordsToOffsets(AdminClient adminClient,
+                                        Map<TopicPartition, Long> targetOffsets) throws Exception {
+        // 初始化删除请求
+        Map<TopicPartition, RecordsToDelete> recordsToDelete = new LinkedHashMap<>();
+
+        // 遍历目标 offset
+        targetOffsets.forEach((topicPartition, offset) -> {
+            // offset 小于等于 0 表示当前分区没有可删除数据
+            if (offset > 0L) {
+                recordsToDelete.put(topicPartition, RecordsToDelete.beforeOffset(offset));
+            }
+        });
+
+        // 没有可删除数据时直接返回
+        if (recordsToDelete.isEmpty()) {
+            logger.info("Kafka topics 当前没有可清理的数据");
+            return;
+        }
+
+        // 记录即将清理的分区
+        recordsToDelete.forEach((topicPartition, records) ->
+                logger.warn("快照模式清理 Kafka topic 数据: topic={}, partition={}",
+                        topicPartition.topic(), topicPartition.partition()));
+
+        // 执行删除记录请求
+        adminClient.deleteRecords(recordsToDelete).all().get(60, TimeUnit.SECONDS);
+    }
+
+    // 等待 earliest offset 推进到目标 offset
+    private void waitUntilRecordsDeleted(AdminClient adminClient,
+                                         Map<TopicPartition, Long> targetOffsets,
+                                         long timeoutMillis,
+                                         long retryIntervalMillis) throws Exception {
+        // 计算截止时间
+        long deadline = System.currentTimeMillis() + timeoutMillis;
+
+        // 在超时时间内轮询 earliest offset
+        while (System.currentTimeMillis() < deadline) {
+            // 判断是否全部清理完成
+            if (allEarliestOffsetsReached(adminClient, targetOffsets)) {
+                return;
+            }
+
+            // 等待后重试
+            Thread.sleep(retryIntervalMillis);
+        }
+
+        // 超时仍未完成则失败
+        throw new TimeoutException("Timed out waiting Kafka records deleted: " + targetOffsets.keySet());
+    }
+
+    // 判断所有分区 earliest offset 是否已经推进到目标 offset
+    private boolean allEarliestOffsetsReached(AdminClient adminClient,
+                                              Map<TopicPartition, Long> targetOffsets) throws Exception {
+        // 初始化 earliest offset 查询
+        Map<TopicPartition, OffsetSpec> earliestOffsetQueries = new LinkedHashMap<>();
+
+        // 只查询目标 offset 大于 0 的分区
+        targetOffsets.forEach((topicPartition, targetOffset) -> {
+            if (targetOffset > 0L) {
+                earliestOffsetQueries.put(topicPartition, OffsetSpec.earliest());
+            }
+        });
+
+        // 没有需要确认的分区则认为完成
+        if (earliestOffsetQueries.isEmpty()) {
+            return true;
+        }
+
+        // 查询 earliest offset
+        Map<TopicPartition, ListOffsetsResult.ListOffsetsResultInfo> earliestOffsetResults =
+                adminClient.listOffsets(earliestOffsetQueries).all().get(30, TimeUnit.SECONDS);
+
+        // 检查每个分区是否达到目标 offset
+        for (Map.Entry<TopicPartition, OffsetSpec> entry : earliestOffsetQueries.entrySet()) {
+            TopicPartition topicPartition = entry.getKey();
+            long targetOffset = targetOffsets.get(topicPartition);
+            long earliestOffset = earliestOffsetResults.get(topicPartition).offset();
+
+            // earliest offset 未推进到目标 offset 时说明清理尚未完成
+            if (earliestOffset < targetOffset) {
+                return false;
+            }
+        }
+
+        // 所有分区均完成清理
+        return true;
+    }
 
 
 

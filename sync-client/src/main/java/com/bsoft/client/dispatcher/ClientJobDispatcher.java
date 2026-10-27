@@ -8,6 +8,7 @@ import com.bsoft.client.o2k.LoadConfigResultType;
 import com.bsoft.client.o2k.OracleToKafka;
 import com.bsoft.client.signal.JobFailureListener;
 import com.bsoft.common.config.properties.ClientInfo;
+import com.bsoft.common.enums.JobLaunchMode;
 import com.bsoft.common.enums.JobStatus;
 import com.bsoft.common.util.ExceptionDetailUtil;
 import com.bsoft.common.util.IdGenerateUtil;
@@ -1203,8 +1204,8 @@ public class ClientJobDispatcher implements CommandLineRunner, JobFailureListene
         // 重启前从 CDC_DATA_SOURCE_RUN_STATE 刷新启动模式，避免 snapshot 完成后仍按 SNAPSHOT 重启。
         oracleToKafka.refreshRuntimeStartupMode(runtime);
 
-        // 使用刷新后的 runtime 重新构建并提交 job。
-        oracleToKafka.startSingleDataSourceJob(runtime);
+// 使用刷新后的 runtime 重新构建并提交 job，失败重启不清空 scn。
+        oracleToKafka.startSingleDataSourceJob(runtime, JobLaunchMode.RESTART_AFTER_FAILURE);
 
         // 记录自动重启提交完成日志。
         logger.info("Runtime job submitted after failure. clientId={}, dataSourceId={}, startupMode={}, reason={}",

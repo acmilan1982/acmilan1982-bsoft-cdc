@@ -93,7 +93,7 @@ public class LogPersistenceJob extends CDCJob {
             // 2.根据配置库的内容，初始化当前执行所需的环境
             initLogServerExecutionEnvironment();
 
-            // 3.是从 kafka 读取数据，写入目标库，可同时写入多个目标库
+            // 3.从 kafka 读取数据，写入日志表(正确表，错误表)
             pullFromKafkaAndPublishToDB();
 
         } catch (Exception e) {
@@ -292,15 +292,13 @@ public class LogPersistenceJob extends CDCJob {
     }
 
     // 网络缓冲区配置
-    public void configureNetworkBufferPool(Configuration configuration) // 窗口长度，步长默认为5s
-            throws IOException {
+    public void configureNetworkBufferPool(Configuration configuration){
 
-        // 总进程内存给宽一点
-        configuration.setString("taskmanager.memory.process.size", "2048m");
 
-        // ✅ 固定网络内存为 256MB（min==max）
-        configuration.setString("taskmanager.memory.network.min", "256mb");
-        configuration.setString("taskmanager.memory.network.max", "256mb");
+        // 固定网络内存大小
+        configuration.setString("taskmanager.memory.network.min", "512mb");
+        configuration.setString("taskmanager.memory.network.min", "512mb");
+        configuration.setString("taskmanager.memory.network.fraction", "0.125");
     }
 
 

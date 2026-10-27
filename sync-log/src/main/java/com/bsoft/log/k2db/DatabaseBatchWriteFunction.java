@@ -21,7 +21,6 @@ public class DatabaseBatchWriteFunction extends ProcessFunction<LogKafkaMessage,
 
     private LogInfo logInfo;
 
-//    // 移除原有的 LogCollector logCollector 字段
     private transient LogCollector logCollector;
 
 

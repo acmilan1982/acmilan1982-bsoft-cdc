@@ -1,0 +1,117 @@
+client-info:
+  clientId: hosp-012
+      # 每个客户端的唯一标识，必须是唯一的,一旦设置后不能修改，因为与flink的检查点id相关，万一clientId变了，
+                              # 会导致检查点无法恢复，建议使用医院编号或其他唯一标识符
+  version: 1.0
+  description: 总部测试        # 客户端描述信息，可以是任何字符串
+  ip: 10.16.18.86           # 客户端IP地址，要求可以被 中心端 访问
+  flinkUiPort: 10011         # Flink web UI端口
+  oracle-cdc-pre-requisites: true  # 是否检查当前业务库满足CDC的先决条件，建议不开启
+  kafka-write-mode: parallel     # parallel | ordered
+  snapshot-complete-mark-delay-seconds: 60  # 控制信号出现后，延迟多少秒再标记业务库快照完成
+
+  clean-topics-before-snapshot: false    # SNAPSHOT 模式启动前，由于topics上可能已经存在数据了(重新拍)，该配置项表示 sync-client程序 是否对这些topic做一些处理
+                                        # true：做处理。如何处理，见 “clean-topics-before-snapshot-mode”
+                                        # false：对已经存在的 topic 不做任何处理，此时“clean-topics-before-snapshot-mode”无效。
+
+  clean-topics-before-snapshot-mode: clear-data     # recreate-topic: 删除并重建 topic，
+                                                    # clear-data: 保留 topic 本身，仅清除 topic 中的数据
+
+  clean-topics-before-snapshot-timeout-minutes: 60   # SNAPSHOT 模式自动清理 Kafka topics 的最大等待时间(单个topic)，单位：分钟。
+                                                     # 该时间覆盖 deleteTopics 提交后等待旧 topic 名称释放、以及重新创建 topic 的整体过程。
+                                                     # 生产环境 topic 多、历史数据量大时建议配置为 30-60 分钟或更高。
+
+
+  clean-topics-before-snapshot-retry-interval-seconds: 5   # SNAPSHOT 模式自动清理 Kafka topics 时的重试间隔(单个topic)，单位：秒。
+                                                           # 当 Kafka 删除 topic 后尚未完全释放同名 topic，重新创建可能遇到 TopicExistsException。
+                                                           # 遇到该情况时，sync-client 会按该间隔等待后继续重试。
+
+  dangerous-operation-countdown-seconds: 20    # 危险操作执行前的可中断倒计时窗口。
+                                               # 典型场景：SNAPSHOT 模式启动前删除并重建 Kafka topics。
+                                               # 设置为 0 表示不等待，直接执行。
+
+
+  dangerous-operation-countdown-log-interval-seconds: 5   # 危险操作倒计时日志提示间隔。
+                                                           # 例如倒计时 60 秒、间隔 10 秒，则会提示 60/50/40/30/20/10 秒。
+
+
+
+server:
+  port: 10012               # spring boot服务端口
+  servlet:
+    context-path: /sync-client  # 设置服务的上下文路径，一般不需要修改
+
+config-db:                                       # 配置库的url
+  driver-class-name: oracle.jdbc.OracleDriver
+  url: jdbc:oracle:thin:@192.168.174.65:1521/prod.enmotech.com
+  username: CDC
+  password: CDC
+  maximum-pool-size: 10
+  minimum-idle: 2
+  connection-timeout: 30000
+  idle-timeout: 600000
+
+
+spring:
+  application:
+    name: OracleToKafka
+  main:
+    log-startup-info: true
+    banner-mode: "console"
+  output:
+    ansi:
+      enabled: NEVER
+
+
+# === 日志：控制台 + 文件（按天+大小滚动） ===
+logging:
+  file:
+    name: logs/sync-client.log
+  level:
+    root: INFO
+    org.apache.kafka: WARN
+    org.apache.kafka.clients: WARN
+    org.apache.kafka.clients.consumer: WARN
+    org.apache.kafka.clients.producer: WARN
+    org.apache.kafka.clients.consumer.ConsumerConfig: WARN
+    # 添加ZK监控相关日志级别
+    com.bsoft.server.zookeeper: INFO
+  logback:
+    rollingpolicy:
+      # 保持文件名一致性
+      file-name-pattern: logs/sync-client-%d{yyyy-MM-dd}.%i.log
+      max-file-size: 100MB
+      max-history: 30
+      total-size-cap: 10GB
+      clean-history-on-start: true
+  pattern:
+    console: "%d{yyyy-MM-dd HH:mm:ss.SSS} %-5level  %logger{36} - %msg%n"
+    file:    "%d{yyyy-MM-dd HH:mm:ss.SSS} %-5level  %logger{36} - %msg%n"
+
+
+# kafka地址配置
+kafka:
+  bootstrap:
+    servers: 10.19.16.111:9092
+
+
+##flinke检查点的位置
+##windows 下的路径
+#state-backend:
+#  checkpoint-path: file:///F:/flink-checkpoints/client
+#  enable-incremental: false
+#
+##linux 下的路径
+##state-backend:
+##  checkpoint-path: file:////home/user/bsoft-cdc/flink-checkpoints/servers
+##  enable-incremental: false
+
+
+
+zookeeper:
+  connect-string: "10.19.16.111:2181"
+  session-timeout-ms: 30000        # 增加到30秒（3.4.14版本建议）
+  connection-timeout-ms: 10000     # 连接超时10秒
+  base-path: "/bsoft-cdc"
+  retry-count: 5                   # 增加重试次数
+  retry-interval-ms: 2000          # 增加重试间隔

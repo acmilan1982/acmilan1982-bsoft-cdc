@@ -1,6 +1,7 @@
 package com.bsoft.common.zk.service;
 
 import com.bsoft.common.config.properties.ClientInfo;
+import com.bsoft.common.enums.JobLaunchMode;
 import com.bsoft.common.enums.JobStatus;
 import com.bsoft.common.util.JsonUtil;
 import com.bsoft.common.zk.ZkClient;
@@ -242,20 +243,34 @@ public class ClientJobZkService {
     }
 
 
-    /**
-     * 准备当前 job 的运行态 ZK 节点。
-     */
+
+    // 准备当前 job 的运行态 ZK 节点，默认按首次启动语义清空 scn。
     public void prepareJobRuntimeState() throws Exception {
-        // 创建当前 job 所需的持久化节点。
+        // 兼容旧调用方，保持原有行为。
+        prepareJobRuntimeState(JobLaunchMode.INITIAL_START);
+    }
+
+    // 按启动场景准备当前 job 的运行态 ZK 节点。
+    public void prepareJobRuntimeState(JobLaunchMode launchMode) throws Exception {
+        // 启动场景不能为空，避免隐式使用错误清理策略。
+        if (launchMode == null) {
+            throw new IllegalArgumentException("JobLaunchMode cannot be null");
+        }
+
+        // 创建当前 job 所需的持久化节点和 alive 临时节点。
         initJobNodes();
 
-        // 清理上一次运行留下的运行态数据。
-        clearJobRuntimeState();
+        // 只有首次启动才清空 scn，失败重启保留最近一次观测到的 scn。
+        if (launchMode.isClearScnBeforeStart()) {
+            clearJobRuntimeState();
+        }
 
         // 记录 job 运行态准备完成日志。
-        logger.info("Prepared client job runtime state, clientId={}, dataSourceId={}",
+        logger.info("Prepared client job runtime state, clientId={}, dataSourceId={}, launchMode={}, clearScnBeforeStart={}",
                 clientInfo.getClientId(),
-                dataSourceId);
+                dataSourceId,
+                launchMode,
+                launchMode.isClearScnBeforeStart());
     }
 
     /**

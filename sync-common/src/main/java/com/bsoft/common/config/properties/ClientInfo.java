@@ -1,6 +1,7 @@
 package com.bsoft.common.config.properties;
 
 import com.bsoft.common.enums.JobStartupMode;
+import com.bsoft.common.enums.KafkaTopicCleanMode;
 import com.bsoft.common.enums.KafkaWriteMode;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
@@ -95,6 +96,9 @@ public class ClientInfo extends SimpleClientInfo implements Serializable {
      * SNAPSHOT 模式启动前是否自动删除并重建当前业务库对应的 Kafka topics。
      */
     private boolean cleanTopicsBeforeSnapshot = false;
+
+    // SNAPSHOT 模式启动前清理 Kafka topic 的方式
+    private String cleanTopicsBeforeSnapshotMode = "recreate-topic";
 
     /**
      * SNAPSHOT 模式清理 Kafka topics 的最大等待分钟数。
@@ -362,5 +366,23 @@ public class ClientInfo extends SimpleClientInfo implements Serializable {
     public void setClientAlivePath(String clientAlivePath) {
         // 允许外部配置或测试覆盖路径。
         this.clientAlivePath = clientAlivePath;
+    }
+
+    // 获取 SNAPSHOT 模式启动前清理 Kafka topic 的原始配置
+    public String getCleanTopicsBeforeSnapshotMode() {
+        // 返回原始配置值
+        return cleanTopicsBeforeSnapshotMode;
+    }
+
+    // 设置 SNAPSHOT 模式启动前清理 Kafka topic 的原始配置
+    public void setCleanTopicsBeforeSnapshotMode(String cleanTopicsBeforeSnapshotMode) {
+        // 保存原始配置值
+        this.cleanTopicsBeforeSnapshotMode = cleanTopicsBeforeSnapshotMode;
+    }
+
+    // 解析 SNAPSHOT 模式启动前清理 Kafka topic 的方式
+    public KafkaTopicCleanMode resolveCleanTopicsBeforeSnapshotMode() {
+        // 将配置文本解析为枚举
+        return KafkaTopicCleanMode.fromConfig(cleanTopicsBeforeSnapshotMode);
     }
 }

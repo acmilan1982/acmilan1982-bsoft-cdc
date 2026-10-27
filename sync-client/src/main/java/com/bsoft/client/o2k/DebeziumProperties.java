@@ -41,6 +41,14 @@ public class DebeziumProperties {
         // 3. 因此这里传入的 logicalServerName 会成为最终生效值
         debeziumProps.setProperty("database.server.name", logicalServerName);
 
+
+
+        // Oracle JDBC 网络读取超时，单位：毫秒。
+        // 通过当前 Debezium 配置路径传入 JDBC 属性 oracle.jdbc.ReadTimeout。
+        // 防止静默失联后，采集线程长期阻塞在 socket read。
+        // Oracle JDBC 读取超时：1 小时，单位毫秒
+        debeziumProps.setProperty("database.oracle.jdbc.ReadTimeout", "3600000");
+
         return debeziumProps;
     }
 }

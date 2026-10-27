@@ -95,9 +95,9 @@ public class KafkaMessageDeserializer implements KafkaRecordDeserializationSchem
             startTime = System.currentTimeMillis();
 
             // 打印消费进度。
-            logger.info("sync-log deserialized records={}, topic={}, partition={}, latestOffset={}, elapsedSeconds={}",
-                    recordCount,
+            logger.info("sync-log 读取主题：topic= {} , 读取消息总数：records= {} 条,  partition={}, latestOffset={}, elapsedSeconds={} s",
                     record.topic(),
+                    recordCount,
                     record.partition(),
                     record.offset(),
                     executionTimeSeconds);

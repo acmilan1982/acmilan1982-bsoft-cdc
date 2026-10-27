@@ -12,19 +12,14 @@ import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 
 import javax.sql.DataSource;
-import java.io.ByteArrayOutputStream;
-import java.io.IOException;
-import java.io.PrintWriter;
-import java.io.StringWriter;
+import java.io.*;
+import java.nio.charset.StandardCharsets;
 import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.SQLException;
 import java.sql.Types;
 import java.time.LocalDateTime;
-import java.util.ArrayList;
-import java.util.Arrays;
-import java.util.List;
-import java.util.UUID;
+import java.util.*;
 import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.zip.GZIPOutputStream;
@@ -233,7 +228,7 @@ public class LogCollector {
             waitCount++;
 
             // 打印积压日志
-            logger.warn("写入线程池繁忙，待处理任务 {}/{}，等待第 {}次", getPendingTaskCount(), MAX_PENDING_TASK_COUNT, waitCount);
+            logger.warn("写入线程池繁忙，待处理任务个数/最大待处理任务个数： {}/{}，等待第 {}次", getPendingTaskCount(), MAX_PENDING_TASK_COUNT, waitCount);
 
             // 写入线程池已经关闭时不能继续接收日志
             if (batchExecutor.isShutdown()) {
@@ -361,7 +356,7 @@ public class LogCollector {
 
         logger.info("correctQueue待写入日志----------------------->{} 个SyncLogEntry对象", this.correctQueue.size());
 
-        // ✅ 提交前记录状态
+        //  提交前记录状态
         if (batchExecutor instanceof ThreadPoolExecutor) {
             ThreadPoolExecutor executor = (ThreadPoolExecutor) batchExecutor;
 
@@ -691,7 +686,7 @@ public class LogCollector {
 
     // ==================== 参数绑定 ====================
     private void setParameters(PreparedStatement ps, SyncLogEntry entry,String tableName) throws Exception {
-        ps.setString(1, entry.getCdcLogId());
+        ps.setLong(1, entry.getCdcLogId());
         ps.setString(2, entry.getInstructionType());
         ps.setString(3, entry.getSourceTime());
         ps.setString(4, entry.getTargetTime());
@@ -717,24 +712,75 @@ public class LogCollector {
 
         ps.setString(13, entry.getKafkaEnqueueTime());
         ps.setString(14, entry.getSourceSchemaName());
-        if (tableName.equals("CDC_LOG_ERROR")){
-            ps.setString(15,entry.getRawMessage());
-        }
-        else{
-            ps.setBytes(15, processRawMessage(entry.getRawMessage()));
-        }
+        // CDC_LOG_ERROR 永远保存原始字符串，方便直接排查错误数据。
+        // CDC_LOG_CORRECT 取决于存储策略
+        bindRawMessageClob(ps, 15, entry.getRawMessage(), tableName);
     }
 
-    private byte[] processRawMessage(String rawMessage) {
-
-        if (rawMessageStorageStrategy == RawMessageStorageStrategy.NONE) {            // 不插入该字段
+    // 根据目标表和存储策略，把 rawMessage 转换成最终写入 CLOB 的文本。
+    private String processRawMessage(String rawMessage, String tableName) throws IOException {
+        // RAW_MESSAGE 为空时统一写 NULL。
+        if (rawMessage == null || rawMessage.isEmpty()) {
             return null;
-        } else if (rawMessageStorageStrategy == RawMessageStorageStrategy.PLAIN) {    // 直接以字符串形式存储
-            return rawMessage != null ? rawMessage.getBytes() : null;
-        } else if (rawMessageStorageStrategy == RawMessageStorageStrategy.COMPRESS) { // 使用 GZIP 压缩后存储
-            return compressString(rawMessage);
         }
-        return null;
+
+        // CDC_LOG_ERROR 永远保存原始字符串，方便直接排查错误数据。
+        if ("CDC_LOG_ERROR".equals(tableName)) {
+            return rawMessage;
+        }
+
+        // NONE 策略不保存 CDC_LOG_CORRECT 的 RAW_MESSAGE。
+        if (rawMessageStorageStrategy == RawMessageStorageStrategy.NONE) {
+            return null;
+        }
+
+        // PLAIN 策略保存 CDC_LOG_CORRECT 的原始字符串。
+        if (rawMessageStorageStrategy == RawMessageStorageStrategy.PLAIN) {
+            return rawMessage;
+        }
+
+        // COMPRESS 策略保存 GZIP 后再 Base64 的字符串。
+        if (rawMessageStorageStrategy == RawMessageStorageStrategy.COMPRESS) {
+            return gzipToBase64(rawMessage);
+        }
+
+        // 未知策略直接失败，避免静默写入错误格式。
+        throw new IllegalStateException("unsupported rawMessageStorageStrategy: " + rawMessageStorageStrategy);
+    }
+
+    // 将 RAW_MESSAGE 文本按 CLOB 语义绑定到 PreparedStatement。
+    private void bindRawMessageClob(PreparedStatement ps,
+                                    int parameterIndex,
+                                    String rawMessage,
+                                    String tableName) throws Exception {
+        // 计算最终要写入 CLOB 的文本。
+        String clobText = processRawMessage(rawMessage, tableName);
+
+        // 没有内容时显式写入 CLOB NULL。
+        if (clobText == null) {
+            ps.setNull(parameterIndex, Types.CLOB);
+            return;
+        }
+
+        // 使用字符流写入 CLOB，避免超长字符串触发 VARCHAR 限制。
+        ps.setCharacterStream(parameterIndex, new StringReader(clobText), clobText.length());
+    }
+
+    // 将字符串按 UTF-8 编码、GZIP 压缩、Base64 编码成 CLOB 可保存文本。
+    private String gzipToBase64(String rawMessage) throws IOException {
+        // 使用内存字节流承载 GZIP 输出。
+        try (ByteArrayOutputStream bos = new ByteArrayOutputStream();
+             GZIPOutputStream gzip = new GZIPOutputStream(bos)) {
+
+            // 固定使用 UTF-8 编码，避免受系统默认编码影响。
+            gzip.write(rawMessage.getBytes(StandardCharsets.UTF_8));
+
+            // 完成 GZIP 数据写入。
+            gzip.finish();
+
+            // 把二进制压缩结果转换成 Base64 字符串。
+            return Base64.getEncoder().encodeToString(bos.toByteArray());
+        }
     }
 
     // 保留原有的工具方法
