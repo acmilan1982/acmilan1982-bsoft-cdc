@@ -3,9 +3,7 @@ package com.bsoft.common.bean;
 import com.bsoft.common.util.DateFormatUtils;
 
 import java.time.LocalDateTime;
-import java.util.HashSet;
-import java.util.Map;
-import java.util.Set;
+import java.util.*;
 
 public class KafkaPayload {
     private String schemaName;
@@ -14,6 +12,10 @@ public class KafkaPayload {
     private Map<String, Object> beforeData;
     private Map<String, Object> afterData;
     private Set<String> dateFieldSet;
+
+    // 保存日期字段的数值单位，字段名对应 ms、us、ns；缺少单位信息时使用空 Map。
+    private Map<String, String> dateFieldUnits = new LinkedHashMap<>();
+
     private Set<String> primaryKeySet;
     // 业务库的事务时间
     private String dmlTime;
@@ -181,7 +183,7 @@ public class KafkaPayload {
 //        this.rawMessage = rawMessage;
 //    }
 
-    // dml 相关构造方法，包含 Kafka topic 元数据
+    // 兼容未传入日期字段单位的现有调用，默认使用空单位映射。
     public KafkaPayload(String kafkaTopic,
                         Integer kafkaPartition,
                         String schemaName,
@@ -199,61 +201,110 @@ public class KafkaPayload {
                         boolean snapshot,
                         boolean lastSnapshot,
                         boolean lastRecordInTable) {
-        // 保存 Kafka 原始 topic
+        // 委托包含单位映射的构造方法，统一完成初始化。
+        this(
+                kafkaTopic,
+                kafkaPartition,
+                schemaName,
+                tableName,
+                op,
+                dmlTime,
+                kafkaEnqueueTime,
+                offset,
+                businessDataSourceId,
+                beforeData,
+                afterData,
+                dateFieldSet,
+                Collections.emptyMap(),
+                primaryKeySet,
+                rawMessage,
+                snapshot,
+                lastSnapshot,
+                lastRecordInTable
+        );
+    }
+
+    // 构造包含 Kafka 元数据和日期字段单位的 DML 消息对象。
+    public KafkaPayload(String kafkaTopic,
+                        Integer kafkaPartition,
+                        String schemaName,
+                        String tableName,
+                        String op,
+                        String dmlTime,
+                        String kafkaEnqueueTime,
+                        Long offset,
+                        String businessDataSourceId,
+                        Map<String, Object> beforeData,
+                        Map<String, Object> afterData,
+                        Set<String> dateFieldSet,
+                        Map<String, String> dateFieldUnits,
+                        Set<String> primaryKeySet,
+                        String rawMessage,
+                        boolean snapshot,
+                        boolean lastSnapshot,
+                        boolean lastRecordInTable) {
+        // 保存 Kafka 原始 topic。
         this.kafkaTopic = kafkaTopic;
 
-        // 保存 Kafka 分区号
+        // 保存 Kafka 分区号。
         this.kafkaPartition = kafkaPartition;
 
-        // 保存操作类型
+        // 保存操作类型。
         this.op = op;
 
-        // 保存源 schema
+        // 保存源 schema。
         this.schemaName = schemaName;
 
-        // 保存源表名
+        // 保存源表名。
         this.tableName = tableName;
 
-        // 保存 before 数据
+        // 保存变更前的数据。
         this.beforeData = beforeData;
 
-        // 保存 after 数据
+        // 保存变更后的数据。
         this.afterData = afterData;
 
-        // 保存 DML 时间
+        // 保存业务库的事务时间。
         this.dmlTime = dmlTime;
 
-        // 保存 Kafka 入队时间
+        // 保存消息写入 Kafka 的时间。
         this.kafkaEnqueueTime = kafkaEnqueueTime;
 
-        // 保存 Kafka offset
+        // 保存 Kafka offset。
         this.offset = offset;
 
-        // 保存业务数据源 ID
+        // 保存业务数据源 ID。
         this.businessDataSourceId = businessDataSourceId;
 
-        // 保存日期字段集合
-        this.dateFieldSet = dateFieldSet != null ? dateFieldSet : new HashSet<>();
+        // 保存日期字段集合，未提供时使用空集合。
+        this.dateFieldSet = dateFieldSet != null
+                ? dateFieldSet
+                : new HashSet<>();
 
-        // 保存主键字段集合
-        this.primaryKeySet = primaryKeySet != null ? primaryKeySet : new HashSet<>();
+        // 通过现有 setter 保存单位映射，保证非 null 并复制为只读 Map。
+        setDateFieldUnits(dateFieldUnits);
 
-        // 转换 before 数据中的日期字段
+        // 保存主键字段集合，未提供时使用空集合。
+        this.primaryKeySet = primaryKeySet != null
+                ? primaryKeySet
+                : new HashSet<>();
+
+        // 保留现有的变更前数据转换逻辑。
         convertToLocalDateTime(beforeData);
 
-        // 转换 after 数据中的日期字段
+        // 保留现有的变更后数据转换逻辑。
         convertToLocalDateTime(afterData);
 
-        // 保存原始消息
+        // 保存原始消息。
         this.rawMessage = rawMessage;
 
-        // 保存是否快照数据
+        // 保存是否为快照数据。
         this.snapshot = snapshot;
 
-        // 保存是否最后一条快照数据
+        // 保存是否为最后一条快照数据。
         this.lastSnapshot = lastSnapshot;
 
-        // 保存是否当前表最后一条快照数据
+        // 保存是否为当前表的最后一条快照数据。
         this.lastRecordInTable = lastRecordInTable;
     }
 
@@ -452,5 +503,23 @@ public class KafkaPayload {
 
         // 返回稳定 key
         return topicPart + "#" + offsetPart;
+    }
+
+    // 获取日期字段单位映射，返回值非 null。
+    public Map<String, String> getDateFieldUnits() {
+        // 返回普通 Map，避免不可修改包装类型影响 Kryo 复制。
+        return dateFieldUnits;
+    }
+
+    // 复制并保存日期字段单位，内部始终使用普通 LinkedHashMap。
+    public void setDateFieldUnits(Map<String, String> dateFieldUnits) {
+        // 未提供单位映射时创建可修改的空 Map。
+        if (dateFieldUnits == null) {
+            this.dateFieldUnits = new LinkedHashMap<>();
+            return;
+        }
+
+        // 复制调用方数据，避免共享原 Map，同时支持 Kryo 写入。
+        this.dateFieldUnits = new LinkedHashMap<>(dateFieldUnits);
     }
 }

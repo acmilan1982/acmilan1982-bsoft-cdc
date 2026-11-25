@@ -279,35 +279,75 @@ public class CustomDebeziumDeserializationSchema implements DebeziumDeserializat
     /**
      * 构建 meta 节点
      */
+     // 构建消息元数据，保留日期字段和主键信息，并补充日期字段数值的时间单位。
     private ObjectNode buildMetaNode(Struct after, String fullyQualifiedTableName) {
+        // 创建元数据节点和日期字段信息容器。
         ObjectNode metaNode = mapper.createObjectNode();
-
-        // 提取日期字段
         ArrayNode dateFieldArrayNode = mapper.createArrayNode();
+        ObjectNode dateFieldUnitsNode = mapper.createObjectNode();
+
+        // 仅从 after 的 Schema 提取字段信息，不依赖字段当前是否有值。
         if (after != null) {
             for (Field field : after.schema().fields()) {
-                if (field.schema().name() != null &&
-                        field.schema().name().toLowerCase().contains("timestamp")) {
-                    // 转成小写
-                    dateFieldArrayNode.add(field.name().toLowerCase());
+                // 获取字段逻辑类型名称，并保持输出字段名为小写。
+                String schemaName = field.schema().name();
+                String fieldName = field.name().toLowerCase();
+
+                // 保持现有 dateFields 的识别逻辑。
+                if (schemaName != null
+                        && schemaName.toLowerCase().contains("timestamp")) {
+                    dateFieldArrayNode.add(fieldName);
+                }
+
+                // 没有逻辑类型名称的字段不参与时间单位映射。
+                if (schemaName == null) {
+                    continue;
+                }
+
+                // 完整匹配 Debezium 逻辑类型，标识消息中整数值的时间单位。
+                switch (schemaName) {
+                    case "io.debezium.time.Timestamp":
+                        // Timestamp 的整数值表示从 epoch 开始的毫秒数。
+                        dateFieldUnitsNode.put(fieldName, "ms");
+                        break;
+                    case "io.debezium.time.MicroTimestamp":
+                        // MicroTimestamp 的整数值表示从 epoch 开始的微秒数。
+                        dateFieldUnitsNode.put(fieldName, "us");
+                        break;
+                    case "io.debezium.time.NanoTimestamp":
+                        // NanoTimestamp 的整数值表示从 epoch 开始的纳秒数。
+                        dateFieldUnitsNode.put(fieldName, "ns");
+                        break;
+                    default:
+                        // 其他逻辑类型不写入毫秒、微秒或纳秒映射。
+                        break;
                 }
             }
         }
-        metaNode.set("dateFields", dateFieldArrayNode);
 
-        // 提取主键
+        // 即使 after 不存在，也输出空数组和空对象以保持消息结构一致。
+        metaNode.set("dateFields", dateFieldArrayNode);
+        metaNode.set("dateFieldUnits", dateFieldUnitsNode);
+
+        // 按现有配置提取主键字段。
         ArrayNode primaryKeyArrayNode = mapper.createArrayNode();
         try {
-            List<String> primaryKeys = businessDataSourceConfig.getKeyColumnsByFullyQualifiedTableName(fullyQualifiedTableName);
+            List<String> primaryKeys =
+                    businessDataSourceConfig.getKeyColumnsByFullyQualifiedTableName(
+                            fullyQualifiedTableName);
 
-            // 一般已经是小写了，这里再保险起见
-            for (String pk : primaryKeys) {
-                primaryKeyArrayNode.add(TextNode.valueOf(pk.toLowerCase()));
+            // 保持主键字段名为小写。
+            for (String primaryKeyColumn : primaryKeys) {
+                primaryKeyArrayNode.add(
+                        TextNode.valueOf(primaryKeyColumn.toLowerCase()));
             }
-        } catch (Exception e) {
-            logger.warn("⚠️ 获取表 {} 的主键配置失败: {}", fullyQualifiedTableName, e.getMessage());
+        } catch (Exception exception) {
+            // 获取主键配置失败时保留现有告警处理。
+            logger.warn("⚠️ 获取表 {} 的主键配置失败: {}",
+                    fullyQualifiedTableName, exception.getMessage());
         }
 
+        // 写入主键信息并返回完整元数据。
         metaNode.set("primaryKey", primaryKeyArrayNode);
         return metaNode;
     }

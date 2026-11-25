@@ -17,6 +17,7 @@ import org.springframework.stereotype.Component;
 import javax.annotation.PostConstruct;
 import java.io.Serializable;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
 
@@ -87,12 +88,13 @@ public class ServerInfo extends  BaseInfo  implements Serializable {
 
 
 
-    // 指定类型的目标库：启用实时新增数据启用批量写入
-    // 配置项: server-info.realtime-insert-batch-enabled-database-types
-    // 未配置或配置为空时，默认只启用 DORIS。
-    private List<DatabaseType> realtimeInsertBatchEnabledDatabaseTypes = new ArrayList<>(
-            Collections.singletonList(DatabaseType.DORIS)
-    );
+    // 启用实时增删改批量处理的目标库类型。
+    // 未配置时开启 Oracle、MySQL、Doris；显式空列表表示全部关闭。
+    private List<DatabaseType> realtimeBatchEnabledDatabaseTypes =
+            new ArrayList<>(Arrays.asList(
+                    DatabaseType.ORACLE,
+                    DatabaseType.MYSQL,
+                    DatabaseType.DORIS));
 
     public ServerInfo() {
 
@@ -234,43 +236,61 @@ public class ServerInfo extends  BaseInfo  implements Serializable {
         this.monitorMetricTopic = monitorMetricTopic;
     }
 
-    // 获取实时新增数据启用批量写入的目标库类型列表。
-    // 返回内部配置列表，供配置绑定和运行期判断使用。
-    public List<DatabaseType> getRealtimeInsertBatchEnabledDatabaseTypes() {
-        return realtimeInsertBatchEnabledDatabaseTypes;
+    // 获取实时增删改启用批量处理的目标库类型列表。
+    public List<DatabaseType> getRealtimeBatchEnabledDatabaseTypes() {
+        // 保留普通可修改集合，供配置绑定使用。
+        return realtimeBatchEnabledDatabaseTypes;
     }
 
-    // 设置实时新增数据启用批量写入的目标库类型列表。
-    // 如果配置为空，则回退到默认值 DORIS，保证未配置时生产行为符合当前预期。
-    public void setRealtimeInsertBatchEnabledDatabaseTypes(List<DatabaseType> realtimeInsertBatchEnabledDatabaseTypes) {
-        // 配置为空时使用默认值 DORIS。
-        if (realtimeInsertBatchEnabledDatabaseTypes == null || realtimeInsertBatchEnabledDatabaseTypes.isEmpty()) {
-            this.realtimeInsertBatchEnabledDatabaseTypes = new ArrayList<>(
-                    Collections.singletonList(DatabaseType.DORIS)
-            );
+    // 设置实时增删改批量处理的目标库类型列表。
+    public void setRealtimeBatchEnabledDatabaseTypes(
+            List<DatabaseType> databaseTypes) {
+        // null 按未配置处理，开启当前支持的全部目标库类型。
+        if (databaseTypes == null) {
+            this.realtimeBatchEnabledDatabaseTypes =
+                    new ArrayList<>(Arrays.asList(
+                            DatabaseType.ORACLE,
+                            DatabaseType.MYSQL,
+                            DatabaseType.DORIS));
             return;
         }
 
-        // 保存配置值。
-        this.realtimeInsertBatchEnabledDatabaseTypes = realtimeInsertBatchEnabledDatabaseTypes;
+        // 复制并去重，显式空列表保持为空。
+        List<DatabaseType> configuredTypes = new ArrayList<>();
+        for (DatabaseType databaseType : databaseTypes) {
+            // 配置中的无效元素明确报错。
+            if (databaseType == null) {
+                throw new IllegalArgumentException(
+                        "实时批量处理的数据库类型不能为 null");
+            }
+
+            // 同一数据库类型仅保存一次。
+            if (!configuredTypes.contains(databaseType)) {
+                configuredTypes.add(databaseType);
+            }
+        }
+
+        // 已配置时严格采用配置结果，不为未列出的数据库类型开启批量。
+        this.realtimeBatchEnabledDatabaseTypes = configuredTypes;
     }
 
-    // 判断指定目标库类型是否启用实时新增批量写入。
-    // TargetTableWriteProcessFunction 通过该方法决定 r/c 是否进入实时批量缓冲区。
-    public boolean isRealtimeInsertBatchEnabled(DatabaseType databaseType) {
-        // 空数据库类型不启用批量。
+    // 判断指定目标库类型是否启用实时增删改批量处理。
+// writer 在 open 中调用一次，运行期间使用保存的结果。
+    public boolean isRealtimeBatchEnabled(DatabaseType databaseType) {
+        // 未指定目标库类型时不启用批量。
         if (databaseType == null) {
             return false;
         }
 
-        // 配置列表为空时按默认 DORIS 处理，避免外部误置空集合导致 Doris 批量关闭。
-        if (this.realtimeInsertBatchEnabledDatabaseTypes == null
-                || this.realtimeInsertBatchEnabledDatabaseTypes.isEmpty()) {
-            return databaseType == DatabaseType.DORIS;
+        // 防御性处理未初始化配置，默认开启当前支持的全部目标库类型。
+        if (realtimeBatchEnabledDatabaseTypes == null) {
+            return databaseType == DatabaseType.ORACLE
+                    || databaseType == DatabaseType.MYSQL
+                    || databaseType == DatabaseType.DORIS;
         }
 
-        // 判断当前目标库类型是否在启用列表中。
-        return this.realtimeInsertBatchEnabledDatabaseTypes.contains(databaseType);
+        // 空列表返回 false；非空列表仅开启明确列出的数据库类型。
+        return realtimeBatchEnabledDatabaseTypes.contains(databaseType);
     }
 
 }

@@ -3,6 +3,7 @@ package com.bsoft.server.sql.delete;
 import com.bsoft.common.bean.KafkaPayload;
 import com.bsoft.common.bean.TargetDataSourceConfig;
 import com.bsoft.common.constants.CdcColumnConstants;
+import com.bsoft.common.enums.DatabaseType;
 import com.bsoft.common.enums.TableRowDeleteStrategy;
 import com.bsoft.common.constants.CdcSqlConstants;
 import com.bsoft.server.sql.adapter.DataSourceHolder;
@@ -12,6 +13,7 @@ import org.apache.logging.log4j.Logger;
 import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.SQLException;
+import java.sql.Statement;
 import java.util.*;
 import java.util.stream.Collectors;
 
@@ -275,4 +277,166 @@ public abstract class AbstractDeleteStrategy implements DeleteStrategy {
 
         return statusMap;
     }
+
+
+
+
+
+    // 使用 JDBC 事务执行 Oracle、MySQL 批量删除。
+// 按输入顺序绑定和执行，整批提交成功后正常返回。
+// 任一校验、绑定或执行失败均抛出异常，由上层记录整批失败。
+    @Override
+    public void executeBatchDelete(String tableName,
+                                   List<KafkaPayload> payloads,
+                                   boolean forcePhysicalDelete) throws Exception {
+        // 校验必要参数，空批次无需访问数据库。
+        Objects.requireNonNull(payloads, "删除批次不能为 null");
+        if (payloads.isEmpty()) {
+            return;
+        }
+        if (tableName == null || tableName.trim().isEmpty()) {
+            throw new IllegalArgumentException("删除的目标表名不能为空");
+        }
+
+        // 检查策略初始化状态。
+        if (dataSourceHolder == null
+                || dataSourceHolder.getTargetDataSourceConfig() == null) {
+            throw new IllegalStateException("删除策略尚未初始化");
+        }
+
+        // 本实现仅供 Oracle、MySQL 使用，Doris 必须重写 HTTP 批量入口。
+        DatabaseType databaseType = dataSourceHolder
+                .getTargetDataSourceConfig().getDataSourceType();
+        if (databaseType != DatabaseType.ORACLE
+                && databaseType != DatabaseType.MYSQL) {
+            throw new UnsupportedOperationException(
+                    "当前 JDBC 批量删除入口不支持: " + databaseType);
+        }
+
+        // 非强制物理删除时，必须使用明确的删除配置。
+        if (!forcePhysicalDelete
+                && tableRowDeleteStrategy != TableRowDeleteStrategy.DELETE
+                && tableRowDeleteStrategy != TableRowDeleteStrategy.DELETE_FLAG) {
+            throw new IllegalStateException(
+                    "不支持的删除策略: " + tableRowDeleteStrategy);
+        }
+
+        // 固定使用 cdc_rowid 定位记录，不依赖源表业务主键。
+        Set<String> primaryKeys = new LinkedHashSet<>();
+        primaryKeys.add(CdcColumnConstants.CDC_ROWID_COLUMN_LOWER);
+
+        // 在获取连接前校验整批主键，不读取或转换源日期字段。
+        List<Map<String, Object>> keyRows = new ArrayList<>(payloads.size());
+        for (KafkaPayload payload : payloads) {
+            // 仅允许删除消息进入该入口。
+            if (payload == null || !"d".equals(payload.getOp())) {
+                throw new IllegalArgumentException("删除批次包含空消息或非删除消息");
+            }
+
+            // 删除使用 before 数据。
+            Map<String, Object> beforeData = payload.getBeforeData();
+            if (beforeData == null) {
+                throw new IllegalArgumentException("删除消息缺少 before 数据");
+            }
+
+            // 忽略字段名大小写查找主键，并拒绝大小写重复的主键字段。
+            Object rowId = null;
+            boolean rowIdFound = false;
+            for (Map.Entry<String, Object> entry : beforeData.entrySet()) {
+                if (CdcColumnConstants.CDC_ROWID_COLUMN_LOWER
+                        .equalsIgnoreCase(entry.getKey())) {
+                    if (rowIdFound) {
+                        throw new IllegalArgumentException(
+                                "删除消息包含重复的 cdc_rowid 字段");
+                    }
+                    rowIdFound = true;
+                    rowId = entry.getValue();
+                }
+            }
+
+            // 主键必须为非空字符串，保留原值，不裁剪或转换大小写。
+            if (!(rowId instanceof String)
+                    || ((String) rowId).trim().isEmpty()) {
+                throw new IllegalArgumentException(
+                        "删除消息必须提供非空字符串 cdc_rowid");
+            }
+
+            // 创建规范化的参数数据，不修改原始 before 数据。
+            Map<String, Object> keyData = new LinkedHashMap<>();
+            keyData.put(CdcColumnConstants.CDC_ROWID_COLUMN_LOWER, rowId);
+            keyRows.add(keyData);
+        }
+
+        // 强制物理删除时直接构建 DELETE，不修改策略实例的配置。
+        // 其余情况复用子类 SQL，保留 Oracle、MySQL 原有逻辑删除规则。
+        String sql = forcePhysicalDelete
+                ? String.format(
+                "delete from %s where %s",
+                tableName, buildWhereClause(primaryKeys))
+                : buildDeleteSql(tableName, primaryKeys);
+
+        // 使用独立连接执行整批事务。
+        try (Connection connection = dataSourceHolder.getDataSource().getConnection()) {
+            // 禁用自动提交，所有批次命令成功后再提交。
+            connection.setAutoCommit(false);
+
+            try {
+                // 整批使用同一个 PreparedStatement。
+                try (PreparedStatement statement = connection.prepareStatement(sql)) {
+                    // 按消息到达顺序加入批次，不按主键分组或去重。
+                    for (Map<String, Object> keyData : keyRows) {
+                        // 清除上一条参数，避免残留绑定。
+                        statement.clearParameters();
+
+                        // 强制物理删除只有一个 WHERE 参数。
+                        if (forcePhysicalDelete) {
+                            statement.setObject(
+                                    1,
+                                    keyData.get(CdcColumnConstants.CDC_ROWID_COLUMN_LOWER));
+                        } else {
+                            // 复用原绑定逻辑，包括逻辑删除生成的新 cdc_rowid。
+                            setParameters(statement, keyData, primaryKeys);
+                        }
+
+                        // 当前命令加入 JDBC 批次。
+                        statement.addBatch();
+                    }
+
+                    // 一次执行当前批次，并检查每条命令的结果。
+                    int[] results = statement.executeBatch();
+                    if (results == null || results.length != keyRows.size()) {
+                        throw new SQLException("批量删除返回结果数量与提交数量不一致");
+                    }
+
+                    // 允许影响行数为零，以及驱动返回成功但未提供行数。
+                    for (int resultIndex = 0; resultIndex < results.length; resultIndex++) {
+                        int affectedRows = results[resultIndex];
+                        if (affectedRows < 0 && affectedRows != Statement.SUCCESS_NO_INFO) {
+                            throw new SQLException(
+                                    "批量删除命令执行失败，批次索引="
+                                            + resultIndex + "，返回值=" + affectedRows);
+                        }
+                    }
+                }
+
+                // Statement 正常关闭后提交，提交成功才允许正常返回。
+                connection.commit();
+            } catch (Exception exception) {
+                // 绑定、执行或提交异常时尝试回滚，并保留原始异常。
+                try {
+                    connection.rollback();
+                } catch (Exception rollbackException) {
+                    // 回滚失败作为附加异常保留，不覆盖最初的失败原因。
+                    exception.addSuppressed(rollbackException);
+                }
+                throw exception;
+            }
+        }
+    }
+
+
+
+
+
+
 }

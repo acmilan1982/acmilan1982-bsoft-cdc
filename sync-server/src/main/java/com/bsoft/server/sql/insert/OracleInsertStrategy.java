@@ -25,66 +25,185 @@ import java.time.LocalDateTime;
 import java.util.*;
 import java.util.stream.Collectors;
 
-/**
- * Oracle数据库插入策略实现
- * 修改策略：只插入新数据，如果主键重复则忽略（不插入不更新）
- */
+// Oracle 插入策略，根据日期字段单位选择 SQL 日期表达式并绑定参数
 public class OracleInsertStrategy extends AbstractInsertStrategy {
 
     private static final Logger logger = LogManager.getLogger(OracleInsertStrategy.class);
 
-    public OracleInsertStrategy(TargetDataSourceConfig targetDataSourceConfig) {
-        super(targetDataSourceConfig);
-        // 使用工厂创建适配器
-        this.adapter = DatabaseAdapterFactory.createAdapter(targetDataSourceConfig);
 
+    // 初始化 Oracle 插入策略，创建数据源持有对象和数据库适配器。
+    public OracleInsertStrategy(TargetDataSourceConfig targetDataSourceConfig) {
+        // 初始化基类的数据源配置。
+        super(targetDataSourceConfig);
+
+        // 根据目标库配置创建适配器。
+        this.adapter = DatabaseAdapterFactory.createAdapter(targetDataSourceConfig);
     }
 
-
+    // 保留接口要求的入口，但不为源表日期字段补充或猜测单位。
     @Override
-    public String buildInsertSql(String tableName, List<String> fieldList, Set<String> primaryKeys, Set<String> dateFieldSet) {
-        // 1. 字段名统一转成大写
-        List<String> upperCaseFieldList = convertFieldsToUpperCase(fieldList);
+    public String buildInsertSql(String tableName,
+                                 List<String> fieldList,
+                                 Set<String> primaryKeys,
+                                 Set<String> dateFieldSet) {
+        // 空映射仅适用于没有源日期字段的 SQL，源日期字段缺少单位时明确报错。
+        return buildInsertSql(
+                tableName,
+                fieldList,
+                primaryKeys,
+                dateFieldSet,
+                Collections.emptyMap()
+        );
+    }
+    // 根据明确的字段单位构建 Oracle 插入 SQL。
+    @Override
+    public String buildInsertSql(String tableName,
+                                 List<String> fieldList,
+                                 Set<String> primaryKeys,
+                                 Set<String> dateFieldSet,             // 源表的时间字段，小写
+                                 Map<String, String> dateFieldUnits) { // 源表时间字段的单位，小写
+        // 日期元数据必须使用非 null 集合，没有日期字段时允许为空。
+        Objects.requireNonNull(dateFieldSet, "dateFieldSet 不能为 null");
+        Objects.requireNonNull(dateFieldUnits, "dateFieldUnits 不能为 null");
 
-        // 2. 构建列名部分
-        String columns = String.join(",", upperCaseFieldList);
+        // 所有 列名 均转 大写
+        String columns = String.join(
+                ",",
+                convertFieldsToUpperCase(fieldList)
+        );
 
-        // 3. 构建占位符（date 字段 → TO_DATE）
-        String placeholders = fieldList.stream()
-                .map(f -> {
-                    if (dateFieldSet.contains(f)) {
-                        return "TO_DATE(?, 'yyyy-mm-dd hh24:mi:ss')";
-                    }
-                    return "?";
-                })
-                .collect(Collectors.joining(","));
+        // 按字段顺序构建表达式，保持 SQL 和参数绑定顺序一致。
+        List<String> placeholders = new ArrayList<>(fieldList.size());
+        for (String fieldName : fieldList) {
+            // 使用小写名称查询日期单位及识别 CDC 字段。
+            String normalizedFieldName = fieldName.toLowerCase(Locale.ROOT);
 
-        // 4. 表名也统一大写
-        String upperTable = tableName.toUpperCase();
+            // 判断是否为日期字段，判断与 OracleAdapter 保持一致。
+            boolean dateField = dateFieldSet.contains(fieldName)
+                    || dateFieldSet.contains(normalizedFieldName);
 
+            // 非日期字段使用普通占位符。
+            if (!dateField) {
+                placeholders.add("?");
+                continue;
+            }
+
+            // 服务端生成的 CDC 时间统一精确到秒，不依赖源表单位。
+            if (isCdcTimeField(normalizedFieldName)) {
+                placeholders.add("TO_DATE(?, 'YYYY-MM-DD HH24:MI:SS')");
+                continue;
+            }
+
+            // 源表 时间字段 必须提供明确单位。
+            String unit = dateFieldUnits.get(normalizedFieldName);
+            placeholders.add(buildDatePlaceholder(fieldName, unit));
+        }
+
+        // 保留表名转大写的处理，并避免受 JVM 默认区域设置影响。
+        String upperTable = tableName.toUpperCase(Locale.ROOT);
+
+        // 返回单批次使用的插入 SQL。
         return String.format(
                 "INSERT INTO %s (%s) VALUES (%s)",
                 upperTable,
                 columns,
-                placeholders
+                String.join(",", placeholders)
         );
     }
 
+    // 根据源日期字段单位构建 SQL 表达式，缺少单位时明确报错。
+    private String buildDatePlaceholder(String fieldName, String unit) {
+        // 不再将缺失单位默认解释为毫秒或 DATE。
+        if (unit == null) {
+            throw new IllegalArgumentException(
+                    "日期字段缺少时间单位，字段: " + fieldName
+            );
+        }
 
-
-
-    @Override
-    public void setParameters(PreparedStatement ps, Map<String, Object> data, List<String> keyList, Set<String> dateFieldSet)
-            throws SQLException {
-
-        int index = 1;
-        // 按照keys的顺序设置参数值
-        for (String key : keyList) {
-            Object value = data.get(key);
-            this.adapter.setParameterValue(ps, index++, value, key, dateFieldSet);
+        // 表达式中的格式必须与 OracleAdapter 输出一致。
+        switch (unit) {
+            case "ms":
+                // 毫秒单位按约定保留到秒。
+                return "TO_DATE(?, 'YYYY-MM-DD HH24:MI:SS')";
+            case "us":
+                // 微秒单位保留 6 位小数秒。
+                return "TO_TIMESTAMP(?, 'YYYY-MM-DD HH24:MI:SS.FF6')";
+            case "ns":
+                // 纳秒单位保留 9 位小数秒。
+                return "TO_TIMESTAMP(?, 'YYYY-MM-DD HH24:MI:SS.FF9')";
+            default:
+                // 非法单位附带字段名报错，便于定位消息问题。
+                throw new IllegalArgumentException(
+                        "日期字段单位无效，字段: " + fieldName
+                                + "，单位: " + unit
+                                + "，仅支持 ms、us、ns"
+                );
         }
     }
 
+    // 识别服务端生成的 CDC 时间字段，参数使用小写字段名。
+    private boolean isCdcTimeField(String fieldName) {
+        // 保持与 OracleAdapter 相同的 CDC 时间字段范围。
+        switch (fieldName) {
+            case "cdc_dml_time":
+            case "cdc_kafka_enqueue_time":
+            case "cdc_insert_time":
+            case "cdc_update_time":
+            case "cdc_delete_time":
+                // CDC 时间统一使用秒级日期表达式。
+                return true;
+            default:
+                // 其他日期字段必须使用消息中的单位。
+                return false;
+        }
+    }
+
+
+    // 保留接口要求的入口，不为非空源日期值猜测单位。
+    @Override
+    public void setParameters(PreparedStatement ps,
+                              Map<String, Object> data,
+                              List<String> keyList,
+                              Set<String> dateFieldSet) throws SQLException {
+        // 源日期值缺少单位时，由 OracleAdapter 明确报错。
+        setParameters(
+                ps,
+                data,
+                keyList,
+                dateFieldSet,
+                Collections.emptyMap()
+        );
+    }
+
+    // 按 SQL 字段顺序绑定参数，将当前消息的单位信息传给适配器。
+    @Override
+    public void setParameters(PreparedStatement ps,
+                              Map<String, Object> data,
+                              List<String> keyList,
+                              Set<String> dateFieldSet,
+                              Map<String, String> dateFieldUnits) throws SQLException {
+        // JDBC 参数索引从 1 开始。
+        int parameterIndex = 1;
+
+        // 按生成 SQL 时的字段顺序逐个绑定参数。
+        for (String fieldName : keyList) {
+            // 获取当前字段值，未提供的字段按 null 处理。
+            Object value = data.get(fieldName);
+
+            // 由 OracleAdapter 根据字段单位生成对应的日期参数字符串。
+            this.adapter.setParameterValue(
+                    ps,
+                    parameterIndex,
+                    value,
+                    fieldName,
+                    dateFieldSet,
+                    dateFieldUnits
+            );
+
+            // 移动到下一个参数位置。
+            parameterIndex++;
+        }
+    }
 
 
 

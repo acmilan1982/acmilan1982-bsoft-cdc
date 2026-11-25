@@ -603,9 +603,23 @@ public class DatasourceConfigFetcher {
 //            ps.setString(1, serverInfo.getServerId());
             try (ResultSet rs = ps.executeQuery()) {
                 while (rs.next()) {
+                    // 读取配置名称和值。
                     String key = rs.getString("CONFIG_KEY");
                     String value = rs.getString("CONFIG_VALUE");
-                    if (key == null || value == null) {
+                    // 无配置名称的记录无法处理。
+                    if (key == null) {
+                        continue;
+                    }
+
+                    // 实时批量配置单独处理，“已配置但为空”，表示都不走批量，直走单条
+                    if ("realtime-batch-enabled-database-types".equals(key)) {
+                        serverInfo.setRealtimeBatchEnabledDatabaseTypes(
+                                parseRealtimeBatchDatabaseTypes(value));
+                        continue;
+                    }
+
+                    // 其他配置沿用原来的空值处理。
+                    if (value == null) {
                         continue;
                     }
 
@@ -631,15 +645,6 @@ public class DatasourceConfigFetcher {
                         case "monitor-metric-topic-name":
                             serverInfo.setMonitorMetricTopic(value);
                             break;
-                        case "realtime-insert-batch-enabled-database-types":
-
-                            List<DatabaseType> realtimeInsertBatchEnabledDatabaseTypes = Arrays.stream(value.split(","))
-                                    // 在传入 fromCode 之前，直接处理好字符串，减少 Stream 阶段
-                                    .map(str -> DatabaseType.fromCode(str.trim().toUpperCase()))
-                                    .collect(Collectors.toList());
-
-                            serverInfo.setRealtimeInsertBatchEnabledDatabaseTypes(realtimeInsertBatchEnabledDatabaseTypes);
-                            break;
                         default:
                             break;
                     }
@@ -648,7 +653,45 @@ public class DatasourceConfigFetcher {
         }
     }
 
+    // 解析实时增删改批量处理的目标库类型。
+    // 本方法仅在配置记录存在时调用，空值表示显式关闭全部类型。
+    private List<DatabaseType> parseRealtimeBatchDatabaseTypes(String value) {
+        // 返回普通可修改列表，空列表表示全部关闭。
+        List<DatabaseType> databaseTypes = new ArrayList<>();
 
+        // 配置记录存在但值为 NULL，按显式空列表处理。
+        if (value == null) {
+            return databaseTypes;
+        }
+
+        // 空白或 [] 均表示显式空列表。
+        String configuredValue = value.trim();
+        if (configuredValue.isEmpty() || "[]".equals(configuredValue)) {
+            return databaseTypes;
+        }
+
+        // 使用负 limit 保留末尾空项，避免 ORACLE, 被静默接受。
+        String[] configuredTypes = configuredValue.split(",", -1);
+        for (String configuredType : configuredTypes) {
+            // 允许类型名称周围存在空格。
+            String typeName = configuredType.trim();
+            if (typeName.isEmpty()) {
+                throw new IllegalArgumentException(
+                        "realtime-batch-enabled-database-types 包含空类型项");
+            }
+
+            // 使用现有枚举解析，非法类型明确抛出异常。
+            DatabaseType databaseType = DatabaseType.fromCode(typeName);
+
+            // 去重并保留配置顺序。
+            if (!databaseTypes.contains(databaseType)) {
+                databaseTypes.add(databaseType);
+            }
+        }
+
+        // 返回明确配置的类型，不额外补充默认类型。
+        return databaseTypes;
+    }
     /**
      * 按 key 读取 CDC_SERVER_CONFIG 配置值。
      */

@@ -15,16 +15,8 @@ import java.util.Map;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
-/**
- * ClassName: OracleToMySQLTypeConverter
- * Package:   com.bsoft.server.sql.converter
- * Description: Oracle到MySQL字段类型转换工具类
- *
- * @Author: snoopy
- * @Create: 2025/8/29 - 14:30
- */
+// Oracle 到 MySQL 类型转换器，普通日期及时间戳统一映射为秒级 DATETIME。
 public class OracleToMySQLTypeConverter {
-
     // Oracle到MySQL类型映射表
     private static final Map<String, String> TYPE_MAPPING = new HashMap<>();
 
@@ -49,8 +41,11 @@ public class OracleToMySQLTypeConverter {
         TYPE_MAPPING.put("LONG", "LONGTEXT");
 
         // 日期时间类型
+// Oracle DATE 包含时分秒，映射为 MySQL DATETIME。
         TYPE_MAPPING.put("DATE", "DATETIME");
-        TYPE_MAPPING.put("TIMESTAMP", "TIMESTAMP");
+
+// 未指定精度的 Oracle TIMESTAMP 同样映射为秒级 DATETIME。
+        TYPE_MAPPING.put("TIMESTAMP", "DATETIME");
         TYPE_MAPPING.put("TIMESTAMP WITH TIME ZONE", "TIMESTAMP");
         TYPE_MAPPING.put("TIMESTAMP WITH LOCAL TIME ZONE", "TIMESTAMP");
 
@@ -112,8 +107,8 @@ public class OracleToMySQLTypeConverter {
             case "RAW":
                 return "VARBINARY(" + params + ")";
             case "TIMESTAMP":
-                // Oracle TIMESTAMP(6) -> MySQL TIMESTAMP(6)
-                return "TIMESTAMP(" + params + ")";
+                // 忽略 Oracle 小数秒精度，所有 TIMESTAMP(p) 统一映射为 DATETIME。
+                return "DATETIME";
             default:
                 String mysqlBaseType = TYPE_MAPPING.get(baseType);
                 if (mysqlBaseType != null) {

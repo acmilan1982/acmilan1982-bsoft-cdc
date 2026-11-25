@@ -7,10 +7,8 @@ import com.bsoft.server.sql.adapter.DataSourceHolder;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 
-import java.sql.Connection;
-import java.sql.PreparedStatement;
-import java.sql.SQLException;
-import java.sql.Statement;
+import java.sql.*;
+import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
 
@@ -34,6 +32,67 @@ public abstract class AbstractDDLStrategy implements DDLStrategy{
     protected AbstractDDLStrategy(TargetDataSourceConfig targetDataSourceConfig) {
         this.dataSourceHolder = new DataSourceHolder(targetDataSourceConfig) ;
     }
+
+
+    // 读取目标表字段元数据，供 Oracle、MySQL 的字段过滤和补齐使用。
+// Doris 已重写该方法，继续使用自己的字段读取实现。
+    @Override
+    @SuppressWarnings("unchecked")
+    public <T extends ColumnInfo> List<T> getTableColumns(String tableName)
+            throws Exception {
+        // 校验目标表名。
+        if (tableName == null || tableName.trim().isEmpty()) {
+            throw new IllegalArgumentException("读取字段元数据的目标表名不能为空");
+        }
+
+        // 检查数据源初始化状态。
+        if (dataSourceHolder == null || dataSourceHolder.getDataSource() == null) {
+            throw new IllegalStateException("读取目标字段元数据的数据源尚未初始化");
+        }
+
+        // 沿用现有策略的目标表名使用方式。
+        // 恒假条件保证结果集不包含业务记录。
+        String sql = "SELECT * FROM " + tableName + " WHERE 1 = 0";
+
+        // 仅执行查询，不创建或修改表结构。
+        try (Connection connection = dataSourceHolder.getDataSource().getConnection();
+             PreparedStatement statement = connection.prepareStatement(sql);
+             ResultSet resultSet = statement.executeQuery()) {
+            // 从空结果集读取 JDBC 字段描述。
+            ResultSetMetaData metadata = resultSet.getMetaData();
+            int columnCount = metadata.getColumnCount();
+            if (columnCount <= 0) {
+                throw new SQLException(
+                        "未读取到目标表字段元数据，table=" + tableName);
+            }
+
+            // 按目标表字段顺序构造列表。
+            List<T> columns = new ArrayList<>(columnCount);
+            for (int columnIndex = 1; columnIndex <= columnCount; columnIndex++) {
+                // 保留数据库返回的实际字段名称及大小写。
+                String columnName = metadata.getColumnName(columnIndex);
+                if (columnName == null || columnName.trim().isEmpty()) {
+                    throw new SQLException(
+                            "目标字段元数据包含空字段名，table="
+                                    + tableName + "，columnIndex=" + columnIndex);
+                }
+
+                // 当前 JDBC 更新使用字段名进行过滤和补齐。
+                // 类型保存驱动返回的类型名称，不用于重建完整 DDL。
+                ColumnInfo column = new ColumnInfo();
+                column.setColumnName(columnName);
+                column.setColumnType(metadata.getColumnTypeName(columnIndex));
+
+                // 沿用现有泛型接口，当前 writer 以 List<ColumnInfo> 接收。
+                // 本基类返回普通 ColumnInfo，不提供数据库专属子类对象。
+                columns.add((T) column);
+            }
+
+            // 读取失败时异常向上传播，不用空列表掩盖失败。
+            return columns;
+        }
+    }
+
 
     /**
      * 执行DDL语句
@@ -117,10 +176,10 @@ public abstract class AbstractDDLStrategy implements DDLStrategy{
     }
 
 
-    @Override
-    public  <T extends ColumnInfo> List<T> getTableColumns(String tableName) throws Exception{
-        return Collections.emptyList();
-    }
+//    @Override
+//    public  <T extends ColumnInfo> List<T> getTableColumns(String tableName) throws Exception{
+//        return Collections.emptyList();
+//    }
 
 
 

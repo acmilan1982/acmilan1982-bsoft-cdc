@@ -156,6 +156,20 @@ public class TargetTableWriteProcessFunction
     // 每个 TargetTableWriteProcessFunction 实例最多维护一个实时 timer。
     private transient long realtimeInsertFlushTimerTs = -1L;
 
+
+    // 实时更新、删除的固定批量条数阈值，各自独立计数。
+    private static final int REALTIME_MUTATION_BATCH_SIZE = 500;
+
+    // 实时更新缓冲区，按消息到达顺序保存。
+    private final List<KafkaPayload> realtimeUpdateBuffer = new ArrayList<>();
+
+    // 实时删除缓冲区，按消息到达顺序保存。
+    private final List<KafkaPayload> realtimeDeleteBuffer = new ArrayList<>();
+
+    // 实时增删改是否采用批量缓冲，在 open 中读取一次配置。
+    // 当前 writer 运行期间保持不变，配置变更在服务重启后生效。
+    private transient boolean realtimeBatchEnabled;
+
     // 创建目标表级写入算子
     public TargetTableWriteProcessFunction(ServerInfo serverInfo,
                                            TargetTableWriteContext writeContext,
@@ -236,6 +250,13 @@ public class TargetTableWriteProcessFunction
         // 读取 Doris 表模型
         this.tableModel = this.targetDataSourceConfig.getTableModel(this.tableName);
 
+        // 初始化实时增删改批量模式，仅在 writer 初始化时读取配置。
+        // 未配置默认全部开启，显式空列表全部关闭，运行期间使用保存的结果。
+        this.realtimeBatchEnabled = this.serverInfo != null
+                && this.targetDataSourceConfig != null
+                && this.serverInfo.isRealtimeBatchEnabled(
+                this.targetDataSourceConfig.getDataSourceType());
+
         // 初始化 PIPELINE_SQL_RESULT 场景下的目标表 UNIQUE KEY
         initPipelineSqlResultTargetUniqueKeys();
     }
@@ -268,8 +289,7 @@ public class TargetTableWriteProcessFunction
                 // 处理快照数据
                 handleSnapshotData(row);
             } else {
-//                // 遇到任意实时数据时，先 flush 当前目标表快照缓冲区
-//                flushSnapshotBufferIfNecessary();
+                // 进入 实时数据 处理时，snapshotBuffer一定已经被清空了，因为最后一条快照的lastRecordInTable为true
 
                 // 标记当前 topic 快照阶段结束
                 markSnapshotPhaseEnded(row);
@@ -701,146 +721,634 @@ public class TargetTableWriteProcessFunction
     }
 
 
+//    // 执行现有新增批次，逐条记录结果，并在处理完成后推进 offset。
+//// 策略异常按整批失败记录，不自动重试，不阻断后续操作入队。
+//    private void invokeBatchInsert(List<BatchInsertItem> batchItems,
+//                                   boolean needPadding) throws Exception {
+//        // 空批次无需处理。
+//        if (batchItems == null || batchItems.isEmpty()) {
+//            return;
+//        }
+//
+//        // 保存策略返回的逐条状态，或本次批量调用的失败详情。
+//        Map<Long, String> statusMap = null;
+//        String batchFailureDetail = null;
+//
+//        // 仅捕获策略执行异常，日志和 offset 处理放在调用结束之后。
+//        try {
+//            // 沿用现有新增策略、字段补齐及批量大小管理。
+//            statusMap = insertStrategy.executeBatchInsert(
+//                    tableName,
+//                    batchItems,
+//                    batchSizeManager,
+//                    columnInfoList,
+//                    needPadding);
+//
+//            // 缺少结果时不能确认批次成功。
+//            if (statusMap == null) {
+//                throw new IllegalStateException("批量新增策略未返回执行结果");
+//            }
+//        } catch (Exception exception) {
+//            // 执行失败或结果无法确认时，当前调用中的全部消息记录失败。
+//            batchFailureDetail = "批量新增失败或结果未确认: "
+//                    + ExceptionDetailUtil.buildRootCauseDetail(exception, 2000);
+//
+//            // 输出批次级摘要，不展开业务数据。
+//            logger.warn(
+//                    "batch insert failed, table={}, rows={}, err={}",
+//                    tableName, batchItems.size(), batchFailureDetail);
+//        }
+//
+//        // 为批次中的每条原始消息生成同步日志。
+//        for (BatchInsertItem item : batchItems) {
+//            KafkaPayload payload = item.getPayload();
+//
+//            // 策略抛异常时，不再采用可能不完整的逐条状态。
+//            boolean success;
+//            String logDetail;
+//            if (batchFailureDetail != null) {
+//                success = false;
+//                logDetail = batchFailureDetail;
+//            } else {
+//                // 策略正常返回时，沿用现有状态约定。
+//                String status = statusMap.get(payload.getOffset());
+//                if (status == null) {
+//                    status = "UNKNOWN_ERROR";
+//                }
+//
+//                // 只有明确的 SUCCESS 才记录为成功。
+//                success = "SUCCESS".equals(status);
+//                logDetail = getBatchLogDetail(success, status);
+//            }
+//
+//            // 成功或失败均记录，失败原始消息按现有日志策略保存。
+//            pendingLogEntries.add(buildSyncLogEntry(payload, success, logDetail));
+//        }
+//
+//        // 当前批次已记录处理结果，按 topic 推进 offset。
+//        // 调用方随后正常清空缓冲区，避免异常批次被再次提交。
+//        advanceOffsetsByBatch(batchItems);
+//    }
 
-    // 执行批量插入
+
+    // 执行批量新增，按输入位置关联结果，支持不同 topic 的相同 offset。
+// 策略异常记录为整批失败，处理完成后推进 offset，不自动重试。
     private void invokeBatchInsert(List<BatchInsertItem> batchItems,
                                    boolean needPadding) throws Exception {
-        // 空批次直接返回
+        // 空批次无需处理。
         if (batchItems == null || batchItems.isEmpty()) {
             return;
         }
 
-        // 调用现有插入策略执行批量写入
-        Map<Long, String> statusMap = this.insertStrategy.executeBatchInsert(
-                this.tableName,
-                batchItems,
-                this.batchSizeManager,
-                this.columnInfoList,
-                needPadding
-        );
+        // 保存按输入位置排列的结果，或整批失败详情。
+        List<String> statuses = null;
+        String batchFailureDetail = null;
 
-        // 为每条数据生成日志
-        for (BatchInsertItem item : batchItems) {
-            // 获取 payload
-            KafkaPayload payload = item.getPayload();
+        // 捕获策略执行及结果校验异常，统一交给后续日志处理。
+        try {
+            // 调用新接口，结果第 i 项对应输入第 i 条消息。
+            statuses = insertStrategy.executeBatchInsertOrdered(
+                    tableName,
+                    batchItems,
+                    batchSizeManager,
+                    columnInfoList,
+                    needPadding);
 
-            // 获取 offset
-            Long offset = payload.getOffset();
+            // 数量不匹配时无法可靠关联结果，整批按结果未确认处理。
+            if (statuses == null || statuses.size() != batchItems.size()) {
+                throw new IllegalStateException(
+                        "批量新增结果数量与输入数量不一致，inputCount="
+                                + batchItems.size()
+                                + "，resultCount="
+                                + (statuses == null ? "null" : statuses.size()));
+            }
+        } catch (Exception exception) {
+            // 数据库失败或结果无法确认时，不采用可能不完整的状态列表。
+            batchFailureDetail = "批量新增失败或结果未确认: "
+                    + ExceptionDetailUtil.buildRootCauseDetail(exception, 2000);
 
-            // 获取写入状态
-            String status = statusMap.getOrDefault(offset, "UNKNOWN_ERROR");
+            // 记录批次级摘要，不展开业务数据。
+            logger.warn(
+                    "batch insert failed, table={}, rows={}, err={}",
+                    tableName, batchItems.size(), batchFailureDetail);
+        }
 
-            // 判断是否成功
-            boolean success = "SUCCESS".equals(status);
+        // 按原输入位置逐条生成日志，不使用 offset 查找执行结果。
+        for (int itemIndex = 0; itemIndex < batchItems.size(); itemIndex++) {
+            KafkaPayload payload = batchItems.get(itemIndex).getPayload();
 
-            // 构造日志详情
-            String logDetail = getBatchLogDetail(success, status);
+            // 整批异常时，每条消息都记录同一批次失败原因。
+            boolean success;
+            String logDetail;
+            if (batchFailureDetail != null) {
+                success = false;
+                logDetail = batchFailureDetail;
+            } else {
+                // 读取当前输入位置对应的结果。
+                String status = statuses.get(itemIndex);
 
-            // 添加日志
+                // 缺少单条状态时，当前消息明确记录失败。
+                if (status == null || status.trim().isEmpty()) {
+                    success = false;
+                    logDetail = "批量新增缺少单条执行结果，输入索引=" + itemIndex;
+                } else {
+                    // 只有明确的 SUCCESS 才记录成功。
+                    success = "SUCCESS".equals(status);
+                    logDetail = getBatchLogDetail(success, status);
+                }
+            }
+
+            // 使用原始消息生成日志，保留各自的 topic 来源及 offset 信息。
             pendingLogEntries.add(buildSyncLogEntry(payload, success, logDetail));
         }
 
-        // 保持旧语义，批次执行结束后按 topic 推进 offset
+        // 所有消息已记录处理结果，按各自 topic 推进 offset。
+        // 调用方随后清空缓冲区，失败批次不会自动重新提交。
         advanceOffsetsByBatch(batchItems);
     }
+//    // 执行批量插入
+//    private void invokeBatchInsert(List<BatchInsertItem> batchItems,
+//                                   boolean needPadding) throws Exception {
+//        // 空批次直接返回
+//        if (batchItems == null || batchItems.isEmpty()) {
+//            return;
+//        }
+//
+//        // 调用现有插入策略执行批量写入，statusMap用于记录每条消息的插入结果
+//        Map<Long, String> statusMap = this.insertStrategy.executeBatchInsert(
+//                this.tableName,
+//                batchItems,
+//                this.batchSizeManager,
+//                this.columnInfoList,
+//                needPadding
+//        );
+//
+//        // 为每条数据生成日志
+//        for (BatchInsertItem item : batchItems) {
+//            // 获取 payload
+//            KafkaPayload payload = item.getPayload();
+//
+//            // 获取 offset
+//            Long offset = payload.getOffset();
+//
+//            // 获取写入状态
+//            String status = statusMap.getOrDefault(offset, "UNKNOWN_ERROR");
+//
+//            // 判断是否成功
+//            boolean success = "SUCCESS".equals(status);
+//
+//            // 构造日志详情
+//            String logDetail = getBatchLogDetail(success, status);
+//
+//            // 添加日志
+//            pendingLogEntries.add(buildSyncLogEntry(payload, success, logDetail));
+//        }
+//
+//        // 保持旧语义，批次执行结束后按 topic 推进 offset
+//        advanceOffsetsByBatch(batchItems);
+//    }
 
 
+//    // 处理实时消息，操作切换时先处理全部非当前操作的缓冲数据。
+//    // 新增、更新、删除分别进入各自处理入口，共用实时刷新定时器。
+//    private void processRealTimeData(KafkaPayload row, Context ctx) throws Exception {
+//        // 获取当前消息的操作类型。
+//        String op = row.getOp();
+//
+//        // 在接收当前消息前，刷新全部非当前操作的缓冲区。
+//        // r/c 视为同一种新增操作；DDL 和未知操作会刷新全部缓冲区。
+//        // 刷新完成后，由该方法统一维护共享定时器。
+//        flushNonCurrentRealtimeBuffers(op, ctx);
+//
+//        // 按操作类型分别处理，保持消息到达顺序。
+//        switch (op) {
+//            case "r":
+//            case "c":
+//                // 沿用现有配置，启用批量新增时进入新增缓冲区。
+//                if (isRealtimeInsertBatchEnabled()) {
+//                    handleRealtimeInsert(row, ctx);
+//                } else {
+//                    // 未启用批量新增时，执行单条新增。
+//                    invokeInsert(row);
+//
+//                    // 单条处理完成后推进 offset，包括已经记录的失败。
+//                    advanceOffset(row);
+//                }
+//                break;
+//
+//            case "u":
+//                // 更新进入独立缓冲区，固定条数阈值为 500。
+//                // Doris 遇到重复 cdc_rowid 时，先执行已有批次再缓存当前消息。
+//                // 缓存时不推进 offset，由实际批次处理完成后统一推进。
+//                handleRealtimeUpdate(row, ctx);
+//                break;
+//
+//            case "d":
+//                // 删除进入独立缓冲区，固定条数阈值为 500。
+//                // Doris 遇到重复 cdc_rowid 时，先执行已有批次再缓存当前消息。
+//                // 缓存时不推进 offset，由实际批次处理完成后统一推进。
+//                handleRealtimeDelete(row, ctx);
+//                break;
+//
+//            case "ddl":
+//                // 前序实时缓冲已刷新，调用现有 DDL 入口。
+//                // 当前 invokeDDL 仍只记录暂未处理，不代表执行了目标 DDL。
+//                invokeDDL(row);
+//
+//                // 沿用现有 DDL 消息的 offset 推进规则。
+//                advanceOffset(row);
+//                break;
+//
+//            default:
+//                // 前序实时缓冲已刷新，未知操作仅记录日志。
+//                logger.warn(
+//                        "unknown operation type skipped, op={}, table={}, topic={}",
+//                        op, tableName, row.getKafkaTopic());
+//
+//                // 未知操作跳过后推进 offset。
+//                advanceOffset(row);
+//                break;
+//        }
+//    }
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-    // 处理实时数据。
-    // 如果当前目标库类型启用了实时新增批量写入，则 op 为 r/c 的数据进入实时批量缓冲区。
-    // 未启用批量写入的目标库继续保持原有单条 insert 行为。
+    // 使用初始化时确定的模式处理实时新增、更新和删除。
+    // 开启时缓存后批量执行，关闭时通过相同入口立即执行单条批次。
     private void processRealTimeData(KafkaPayload row, Context ctx) throws Exception {
-        // 获取操作类型。
+        // 获取当前消息操作类型。
         String op = row.getOp();
 
-        // 按操作类型分发。
+        // 切换操作时先处理全部非当前操作的缓冲数据。
+        // 运行期间模式固定，无需处理批量开关动态切换。
+        flushNonCurrentRealtimeBuffers(op, ctx);
+
+        // 分别处理各类操作，保持消息到达顺序。
         switch (op) {
             case "r":
             case "c":
-                // 当前目标库类型启用实时新增批量写入时，缓存 r/c 数据。
-                if (isRealtimeInsertBatchEnabled()) {
+                if (realtimeBatchEnabled) {
+                    // 批量新增沿用现有阈值和共享定时器。
                     handleRealtimeInsert(row, ctx);
                 } else {
-                    // 未启用批量写入时，保持旧逻辑：单条插入。
-                    invokeInsert(row);
+                    // 单条模式直接入队并立即刷新，不注册定时器。
+                    realtimeInsertBuffer.add(row);
 
-                    // 单条处理完成后推进 offset。
-                    advanceOffset(row);
+                    // 复用新增数据构造、执行、日志及 offset 推进。
+                    flushRealtimeInsertBufferIfNecessary();
                 }
                 break;
 
             case "u":
-                // update 前先刷新实时新增缓冲区，保证同一 topic 内 insert 先于 update 落库。
-                flushRealtimeInsertBufferIfNecessary();
+                if (realtimeBatchEnabled) {
+                    // 批量更新使用 500 条阈值及 Doris 重复 key 拆批规则。
+                    handleRealtimeUpdate(row, ctx);
+                } else {
+                    // 单条更新也使用批量接口，当前批次仅包含一条消息。
+                    realtimeUpdateBuffer.add(row);
 
-                // 主动 flush 后删除还未触发的 timer。
-                deleteRealtimeInsertFlushTimer(ctx);
-
-                // 执行原有单条 update。
-                invokeUpdate(row);
-
-                // update 处理完成后推进 offset。
-                advanceOffset(row);
+                    // 复用字段补齐、存在性检查和结果处理。
+                    flushRealtimeUpdateBufferIfNecessary();
+                }
                 break;
 
             case "d":
-                // delete 前先刷新实时新增缓冲区，保证同一 topic 内 insert 先于 delete 落库。
-                flushRealtimeInsertBufferIfNecessary();
+                if (realtimeBatchEnabled) {
+                    // 批量删除使用 500 条阈值及 Doris 重复 key 拆批规则。
+                    handleRealtimeDelete(row, ctx);
+                } else {
+                    // 单条删除直接入队并立即执行。
+                    realtimeDeleteBuffer.add(row);
 
-                // 主动 flush 后删除还未触发的 timer。
-                deleteRealtimeInsertFlushTimer(ctx);
-
-                // 执行原有单条 delete。
-                invokeDelete(row);
-
-                // delete 处理完成后推进 offset。
-                advanceOffset(row);
+                    // 复用表模型判断、删除方式选择和结果处理。
+                    flushRealtimeDeleteBufferIfNecessary();
+                }
                 break;
 
             case "ddl":
-                // ddl 前先刷新实时新增缓冲区。
-                flushRealtimeInsertBufferIfNecessary();
-
-                // 主动 flush 后删除还未触发的 timer。
-                deleteRealtimeInsertFlushTimer(ctx);
-
-                // 执行原有 DDL 处理。
+                // 前序实时缓冲已刷新，调用现有 DDL 入口。
+                // 当前入口只记录暂未处理，不代表已执行目标 DDL。
                 invokeDDL(row);
 
-                // DDL 如果携带 topic/offset，则保持原有推进语义。
+                // 沿用 DDL 消息的 offset 推进规则。
                 advanceOffset(row);
                 break;
 
             default:
-                // 未知操作前也先刷新实时新增缓冲区，避免前序 insert 长时间滞留。
-                flushRealtimeInsertBufferIfNecessary();
-
-                // 主动 flush 后删除还未触发的 timer。
-                deleteRealtimeInsertFlushTimer(ctx);
-
-                // 未知操作只记录日志，不写库。
-                logger.warn("unknown operation type skipped, op={}, table={}, topic={}",
+                // 未知操作只记录日志，前序实时缓冲已经处理。
+                logger.warn(
+                        "unknown operation type skipped, op={}, table={}, topic={}",
                         op, tableName, row.getKafkaTopic());
 
-                // 保持旧语义：未知操作处理完也推进 offset。
+                // 跳过当前消息后推进 offset。
                 advanceOffset(row);
                 break;
         }
     }
+
+    // 刷新实时更新缓冲区，批次成功、失败或明确跳过后均推进 offset。
+    // 数据库执行异常记录为批次失败，不重试，继续处理后续消息。
+    private void flushRealtimeUpdateBufferIfNecessary() throws Exception {
+        // 空缓冲区无需处理。
+        if (realtimeUpdateBuffer.isEmpty()) {
+            return;
+        }
+
+        // 保存当前批次，后续逐条记录结果时使用原始消息身份。
+        List<KafkaPayload> rows = new ArrayList<>(realtimeUpdateBuffer);
+
+        // 默认将正常返回的批次标记为成功。
+        boolean success = true;
+        String logDetail = "批量更新成功";
+
+        // 执行批次，数据库或数据校验异常统一转为失败结果。
+        try {
+            // Doris DUPLICATE 表按业务约定跳过更新。
+            if (shouldSkipMutationForDorisDuplicate()) {
+                // 跳过属于已处理消息，不访问目标数据库。
+                logDetail = "Doris DUPLICATE 表跳过 UPDATE，未执行实际写库";
+                logger.info("Doris DUPLICATE 表跳过 UPDATE，未执行实际写库，table={}, rows={}",
+                        tableName, rows.size());
+            } else {
+                // 所有目标库均要求真正的批量实现，不模拟逐条更新。
+                if (!updateStrategy.supportsBatch()) {
+                    throw new UnsupportedOperationException(
+                            "当前更新策略尚未实现批量更新: "
+                                    + updateStrategy.getClass().getName());
+                }
+
+                // 在调用数据库前统一检查当前批次。
+                for (KafkaPayload row : rows) {
+                    // 更新缓冲区只能包含更新消息。
+                    if (!"u".equals(row.getOp())) {
+                        throw new IllegalArgumentException(
+                                "更新缓冲区包含非更新消息，op=" + row.getOp());
+                    }
+
+                    // 本轮更新统一使用 cdc_rowid 定位目标记录。
+                    // 每条消息使用独立可修改集合，避免相互影响。
+                    LinkedHashSet<String> primaryKeys = new LinkedHashSet<>();
+                    primaryKeys.add(CdcColumnConstants.CDC_ROWID_COLUMN_LOWER);
+                    row.setPrimaryKeySet(primaryKeys);
+
+                    // 更新从 after 中读取主键，缺失时明确失败。
+                    validatePrimaryKeyValuesPresentForMutation(row);
+                }
+
+                // 传递完整消息及目标字段元数据。
+                // 日期单位、字段过滤、补齐和参数绑定由具体更新策略负责。
+                updateStrategy.executeBatchUpdate(tableName, rows, columnInfoList);
+            }
+        } catch (Exception exception) {
+            // 批次执行失败或结果无法确认时，整批记录为失败。
+            success = false;
+            logDetail = "批量更新失败或结果未确认: "
+                    + ExceptionDetailUtil.buildRootCauseDetail(exception, 2000);
+
+            // 输出批次级错误摘要，不在日志中展开整批业务数据。
+            logger.warn(
+                    "batch update failed, table={}, rows={}, err={}",
+                    tableName, rows.size(), logDetail);
+        }
+
+        // 按原始消息分别记录结果，避免不同 topic 的相同 offset 相互覆盖。
+        for (KafkaPayload row : rows) {
+            // 成功、失败及明确跳过均生成同步日志。
+            pendingLogEntries.add(buildSyncLogEntry(row, success, logDetail));
+
+            // 已记录处理结果后推进该消息所属 topic 的 offset。
+            advanceOffset(row);
+        }
+
+        // 当前批次已处理完成，清空缓冲区，避免再次提交。
+        realtimeUpdateBuffer.clear();
+        logger.info("实时更新批次处理完成，table={}, rows={}, success={}, detail={}",
+                tableName, rows.size(), success, logDetail);
+    }
+
+
+    // 在处理当前消息前，刷新全部非当前操作的实时缓冲区。
+    // r/c 共用新增缓冲区，其他操作分别使用独立缓冲区。
+    // DDL 和未知操作不对应任何缓冲区，因此会刷新全部实时缓冲区。
+    private void flushNonCurrentRealtimeBuffers(String currentOp, Context ctx)
+            throws Exception {
+        // r/c 均属于新增，切换为其他操作时刷新新增缓冲区。
+        boolean isInsert = "r".equals(currentOp) || "c".equals(currentOp);
+        if (!isInsert) {
+            flushRealtimeInsertBufferIfNecessary();
+        }
+
+        // 当前不是更新时，先处理此前缓存的更新消息。
+        if (!"u".equals(currentOp)) {
+            flushRealtimeUpdateBufferIfNecessary();
+        }
+
+        // 当前不是删除时，先处理此前缓存的删除消息。
+        if (!"d".equals(currentOp)) {
+            flushRealtimeDeleteBufferIfNecessary();
+        }
+
+        // 全部缓冲区为空时，取消此前注册的实时刷新定时器。
+        // 当前消息随后入队时，由对应处理入口重新注册定时器。
+        // 当前操作仍有缓存时保留原定时器，避免持续来消息导致刷新时间后移。
+        if (realtimeInsertBuffer.isEmpty()
+                && realtimeUpdateBuffer.isEmpty()
+                && realtimeDeleteBuffer.isEmpty()) {
+            deleteRealtimeInsertFlushTimer(ctx);
+        }
+    }
+
+
+
+    // 接收实时更新消息，达到固定阈值或遇到 Doris 重复主键时刷新。
+// 消息入队时不推进 offset，实际处理结果由批次刷新方法统一记录。
+    private void handleRealtimeUpdate(KafkaPayload row, Context ctx) throws Exception {
+        // Doris UNIQUE 表需要保证一次 HTTP 更新批次中没有重复主键。
+        // DUPLICATE 表的跳过处理由批次刷新方法负责。
+        if (isDorisTarget() && !shouldSkipMutationForDorisDuplicate()) {
+            // 按字段名忽略大小写读取主键，主键值本身保持原样。
+            Object currentRowId = findValueIgnoreCase(row.getAfterData(), "cdc_rowid");
+
+            // 缺失或非法主键交给批次处理阶段校验并记录失败。
+            // 此处只对有效字符串主键判断是否需要拆批。
+            if (currentRowId instanceof String
+                    && !((String) currentRowId).trim().isEmpty()) {
+                // 按到达顺序检查已有缓冲消息。
+                for (KafkaPayload bufferedRow : realtimeUpdateBuffer) {
+                    // 获取已有消息的主键，不转换大小写或去除主键中的空格。
+                    Object bufferedRowId = findValueIgnoreCase(
+                            bufferedRow.getAfterData(), "cdc_rowid");
+
+                    // 重复主键出现前先处理此前所有更新，当前消息留给下一批。
+                    if (currentRowId.equals(bufferedRowId)) {
+                        // 刷新会清空缓冲区，因此刷新后立即退出遍历。
+                        flushRealtimeUpdateBufferIfNecessary();
+
+                        // 旧批次已处理完成，取消其定时器。
+                        deleteRealtimeInsertFlushTimer(ctx);
+                        break;
+                    }
+                }
+            }
+        }
+
+        // 将当前消息加入更新缓冲区，保持原始到达顺序。
+        realtimeUpdateBuffer.add(row);
+
+        // 复用现有定时器注册入口，已有定时器时不会重复注册或推迟时间。
+        registerRealtimeInsertFlushTimer(ctx);
+
+        // Oracle、MySQL、Doris 的更新均使用固定 500 条阈值。
+        if (realtimeUpdateBuffer.size() >= REALTIME_MUTATION_BATCH_SIZE) {
+            // 执行当前更新批次，并由刷新方法处理日志、offset 和清空缓冲区。
+            flushRealtimeUpdateBufferIfNecessary();
+
+            // 当前批次已经处理完成，取消尚未触发的定时器。
+            deleteRealtimeInsertFlushTimer(ctx);
+        }
+    }
+
+    // 接收实时删除消息，达到固定阈值或遇到 Doris 重复主键时刷新。
+// 消息入队时不推进 offset，实际处理结果由批次刷新方法统一记录。
+    private void handleRealtimeDelete(KafkaPayload row, Context ctx) throws Exception {
+        // Doris UNIQUE 表的一次 HTTP 删除批次中不包含重复主键。
+        // DUPLICATE 表的跳过处理由批次刷新方法负责。
+        if (isDorisTarget() && !shouldSkipMutationForDorisDuplicate()) {
+            // 删除从 before 中读取主键，字段名忽略大小写。
+            Object currentRowId = findValueIgnoreCase(
+                    row.getBeforeData(), "cdc_rowid");
+
+            // 缺失或非法主键交给批次处理阶段校验并记录失败。
+            // 有效主键保持原值，不转换大小写或去除空格。
+            if (currentRowId instanceof String
+                    && !((String) currentRowId).trim().isEmpty()) {
+                // 按消息到达顺序检查已有删除缓冲。
+                for (KafkaPayload bufferedRow : realtimeDeleteBuffer) {
+                    // 获取已缓存删除消息的主键。
+                    Object bufferedRowId = findValueIgnoreCase(
+                            bufferedRow.getBeforeData(), "cdc_rowid");
+
+                    // 重复主键出现时，先处理此前批次。
+                    if (currentRowId.equals(bufferedRowId)) {
+                        // 刷新会清空缓冲区，完成后立即退出遍历。
+                        flushRealtimeDeleteBufferIfNecessary();
+
+                        // 旧批次已处理完成，取消其定时器。
+                        deleteRealtimeInsertFlushTimer(ctx);
+                        break;
+                    }
+                }
+            }
+        }
+
+        // 当前删除消息加入缓冲区，保持到达顺序。
+        realtimeDeleteBuffer.add(row);
+
+        // 复用共享定时器，已有定时器时不重复注册或推迟触发时间。
+        registerRealtimeInsertFlushTimer(ctx);
+
+        // Oracle、MySQL、Doris 的删除均使用固定 500 条阈值。
+        if (realtimeDeleteBuffer.size() >= REALTIME_MUTATION_BATCH_SIZE) {
+            // 执行删除批次，由刷新方法记录结果、推进 offset 并清空缓冲区。
+            flushRealtimeDeleteBufferIfNecessary();
+
+            // 当前批次已处理完成，取消尚未触发的定时器。
+            deleteRealtimeInsertFlushTimer(ctx);
+        }
+    }
+
+
+
+
+
+    // 刷新实时删除缓冲区，批次成功、失败或明确跳过后均推进 offset。
+// 按原始消息记录结果，不使用仅以 offset 为键的结果映射。
+    private void flushRealtimeDeleteBufferIfNecessary() throws Exception {
+        // 空缓冲区无需处理。
+        if (realtimeDeleteBuffer.isEmpty()) {
+            return;
+        }
+
+        // 保存当前批次，保持消息顺序和所属 topic 信息。
+        List<KafkaPayload> rows = new ArrayList<>(realtimeDeleteBuffer);
+
+        // 默认将正常返回的批次标记为成功。
+        boolean success = true;
+        String logDetail = "批量删除成功";
+
+        // 执行批次，数据库或数据校验异常统一转为失败结果。
+        try {
+            // Doris DUPLICATE 表按业务约定跳过删除。
+            if (shouldSkipMutationForDorisDuplicate()) {
+                // 跳过属于已处理消息，不访问目标数据库。
+                logDetail = "Doris DUPLICATE 表跳过 DELETE，未执行实际写库";
+                logger.info("Doris DUPLICATE 表跳过 DELETE，未执行实际写库，table={}, rows={}",
+                        tableName, rows.size());
+            } else {
+                // 在调用数据库前统一检查当前批次。
+                for (KafkaPayload row : rows) {
+                    // 删除缓冲区只能包含删除消息。
+                    if (!"d".equals(row.getOp())) {
+                        throw new IllegalArgumentException(
+                                "删除缓冲区包含非删除消息，op=" + row.getOp());
+                    }
+
+                    // 本轮删除统一使用 cdc_rowid 定位目标记录。
+                    // 每条消息使用独立可修改集合。
+                    LinkedHashSet<String> primaryKeys = new LinkedHashSet<>();
+                    primaryKeys.add(CdcColumnConstants.CDC_ROWID_COLUMN_LOWER);
+                    row.setPrimaryKeySet(primaryKeys);
+
+                    // 删除从 before 中读取主键，缺失时明确失败。
+                    validatePrimaryKeyValuesPresentForMutation(row);
+                }
+
+                // 沿用现有业务规则：PIPELINE_SQL_RESULT 的 Doris 删除强制物理删除。
+                // 其他场景由策略按配置选择物理删除或逻辑删除。
+                boolean forcePhysicalDelete =
+                        shouldForcePhysicalDeleteForPipelineSqlResult();
+
+                // 调用待补充的批量入口，整批确认成功才允许正常返回。
+                // 删除不转换源日期字段，也不要求源日期单位映射。
+                deleteStrategy.executeBatchDelete(
+                        tableName, rows, forcePhysicalDelete);
+            }
+        } catch (Exception exception) {
+            // 批次失败或结果无法确认时，整批记录为失败。
+            success = false;
+            logDetail = "批量删除失败或结果未确认: "
+                    + ExceptionDetailUtil.buildRootCauseDetail(exception, 2000);
+
+            // 输出批次级错误摘要，不展开整批业务数据。
+            logger.warn(
+                    "batch delete failed, table={}, rows={}, err={}",
+                    tableName, rows.size(), logDetail);
+        }
+
+        // 直接遍历原始消息，跨 topic 的相同 offset 不会互相覆盖。
+        for (KafkaPayload row : rows) {
+            // 成功、失败及明确跳过均生成同步日志。
+            pendingLogEntries.add(buildSyncLogEntry(row, success, logDetail));
+
+            // 已记录处理结果后推进该消息所属 topic 的 offset。
+            advanceOffset(row);
+        }
+
+        // 当前批次已处理完成，清空缓冲区，避免再次提交。
+        realtimeDeleteBuffer.clear();
+
+        logger.info("实时删除批次处理完成，table={}, rows={}, success={}, detail={}",
+                tableName, rows.size(), success, logDetail);
+    }
+
+
+
+
+
+
+
+
+
+
+
 
 
 
@@ -990,7 +1498,7 @@ public class TargetTableWriteProcessFunction
             // 校验主键值存在
             validatePrimaryKeyValuesPresentForMutation(row);
 
-// PIPELINE_SQL_RESULT + Doris 强制使用物理删除
+            // PIPELINE_SQL_RESULT + Doris 强制使用物理删除
             if (shouldForcePhysicalDeleteForPipelineSqlResult()) {
                 // 执行物理删除
                 this.deleteStrategy.executePhysicalDelete(tableName, row);
@@ -1370,9 +1878,9 @@ public class TargetTableWriteProcessFunction
             return;
         }
 
-        // 记录批量处理摘要。
-        logger.info("start insert payload batch, scene={}, table={}, rowCount={}, fieldGroupCount={}",
-                batchScene, tableName, rows.size(), groupedByFields.size());
+//        // 记录批量处理摘要。
+//        logger.info("start insert payload batch, scene={}, table={}, rowCount={}, fieldGroupCount={}",
+//                batchScene, tableName, rows.size(), groupedByFields.size());
 
         // 判断 Doris 宽表场景是否需要字段补齐。
         boolean needPadding = isDorisTarget() && shouldPadFields(groupedByFields.size());
@@ -1431,11 +1939,12 @@ public class TargetTableWriteProcessFunction
         return grouped;
     }
 
-    // 处理同一字段结构的一批 payload。
-// 该方法只负责把 payload 转成 BatchInsertItem 并调用统一批量写入。
+    // 处理 相同字段结构的 一批 payload。
+    // 该方法只负责把 payload 转成 BatchInsertItem 并调用统一批量写入。
     private void processSameStructurePayloadBatch(List<KafkaPayload> sameStructurePayloads,
-                                                  boolean needPadding,
-                                                  String batchScene) throws Exception {
+                                                  boolean needPadding,   // doris在某些场景下，这些KafkaPayload的字段需要补齐
+                                                  String batchScene)     // 没吊用，纯粹用于日志
+            throws Exception {
         // 空批次直接返回。
         if (sameStructurePayloads == null || sameStructurePayloads.isEmpty()) {
             return;
@@ -1451,7 +1960,7 @@ public class TargetTableWriteProcessFunction
                 continue;
             }
 
-            // 构造统一 insert 批量 item。
+            // 构造用于 批量insert 的item，相当于一个bean。
             BatchInsertItem item = buildInsertBatchItem(payload);
 
             // 构造结果为空时跳过。
@@ -1476,19 +1985,6 @@ public class TargetTableWriteProcessFunction
 
 
 
-
-    // 判断当前目标库类型是否启用实时新增批量写入。
-    // 配置来源为 ServerInfo；未配置时 ServerInfo 默认启用 DORIS。
-    private boolean isRealtimeInsertBatchEnabled() {
-        // 目标库配置为空时不启用批量。
-        if (this.targetDataSourceConfig == null) {
-            return false;
-        }
-
-        // 通过 ServerInfo 判断当前目标库类型是否启用实时批量。
-        return this.serverInfo != null
-                && this.serverInfo.isRealtimeInsertBatchEnabled(this.targetDataSourceConfig.getDataSourceType());
-    }
 
     // 处理实时新增数据。
     // op 为 r/c 且目标库类型启用批量时，只进入缓冲区，不立即写库，不立即推进 offset。
@@ -1538,9 +2034,9 @@ public class TargetTableWriteProcessFunction
 
 
     // 构造 insert 数据的 BatchInsertItem。
-// 快照 insert 和实时新增 insert 使用同一套目标字段语义。
-// 所有 insert 的 cdc_op 都写 i。
-// 所有 insert 都不写 cdc_update_time。
+    // 快照 insert 和实时新增 insert 使用同一套目标字段语义。
+    // 所有 insert 的 cdc_op 都写 i。
+    // 所有 insert 都不写 cdc_update_time。
     private BatchInsertItem buildInsertBatchItem(KafkaPayload payload) {
         // afterData 为空时跳过。
         if (payload.getAfterData() == null || payload.getAfterData().isEmpty()) {
@@ -1580,29 +2076,33 @@ public class TargetTableWriteProcessFunction
 
 
 
-    // processing-time timer 到期回调。
-// 用于刷新未达到批量阈值的实时新增缓冲区。
-// timer 回调运行在 Flink 算子线程内，可以安全写 side output。
+    // 实时数据共用的 processing-time 定时器回调。
+    // 到期时刷新新增、更新、删除缓冲区，并输出同步日志和 offset 提交事件。
     @Override
     public void onTimer(long timestamp,
                         OnTimerContext ctx,
                         Collector<OperationResult> out) throws Exception {
-        // 过滤过期 timer。
-        // 主动 flush 时会删除 timer，但边界情况下仍可能收到旧 timer 回调。
+        // 忽略已经失效的定时器回调。
         if (timestamp != realtimeInsertFlushTimerTs) {
             return;
         }
 
-        // 当前 timer 已经触发，清空 active timer 标记。
+        // 当前定时器已经触发，清除注册标记。
         realtimeInsertFlushTimerTs = -1L;
 
-        // timer 到期时刷新实时新增缓冲区。
+        // 刷新尚未达到新增批量阈值的数据。
         flushRealtimeInsertBufferIfNecessary();
 
-        // 输出 flush 过程中生成的同步日志。
+        // 刷新尚未达到 500 条的更新数据。
+        flushRealtimeUpdateBufferIfNecessary();
+
+        // 刷新尚未达到 500 条的删除数据。
+        flushRealtimeDeleteBufferIfNecessary();
+
+        // 输出本次刷新生成的逐条同步日志。
         drainLogs(ctx);
 
-        // 输出 flush 过程中生成的 offset commit event。
+        // 输出处理完成后的 offset 提交事件。
         emitOffsetCommitEvents(ctx);
     }
 

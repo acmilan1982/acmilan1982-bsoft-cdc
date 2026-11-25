@@ -68,4 +68,18 @@ public interface DeleteStrategy {
     default void executePhysicalDelete(String tableName, KafkaPayload payload) throws Exception {
         executeDelete(tableName, payload);
     }
+
+    // 批量删除入口，支持显式强制物理删除。
+    // forcePhysicalDelete 为 true 时必须执行物理删除；
+    // 为 false 时按策略配置选择物理删除或逻辑删除。
+    // 实现必须保持消息顺序，支持混合多个 topic，不以 offset 单独标识消息。
+    // 正常返回表示整个批次确认成功；失败或结果无法确认时必须抛出异常。
+    default void executeBatchDelete(String tableName,
+                                    List<KafkaPayload> payloads,
+                                    boolean forcePhysicalDelete) throws Exception {
+        // 未迁移的策略明确报错，不回退到单条删除或旧的 offset 结果映射。
+        throw new UnsupportedOperationException(
+                "当前删除策略尚未实现三参数批量删除: "
+                        + getClass().getName());
+    }
 }

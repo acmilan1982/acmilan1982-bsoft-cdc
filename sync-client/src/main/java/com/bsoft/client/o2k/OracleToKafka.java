@@ -1035,11 +1035,11 @@ public class OracleToKafka extends CDCJob {
                 businessDataSourceConfig.getDataSourceServiceName(),
                 dataSourceId);
 
-        for (int i = 5; i > 0; i--) {
-            System.out.println("倒计时：" + i + " 秒");
-            Thread.sleep(1000);
-        }
-        System.out.println("倒计时结束");
+//        for (int i = 5; i > 0; i--) {
+//            System.out.println("倒计时：" + i + " 秒");
+//            Thread.sleep(1000);
+//        }
+//        System.out.println("倒计时结束");
 
         SourceFunction<String> oracleSource = OracleSource.<String>builder()
                 // 设置 Oracle 主机。

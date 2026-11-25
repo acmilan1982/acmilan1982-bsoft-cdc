@@ -12,6 +12,7 @@ import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
 import java.util.*;
 
+// 解析 Oracle CDC 消息；非删除 DML 必须提供日期字段及单位节点。
 public class OracleCdcJsonParser  {
     private static final Logger logger = LogManager.getLogger(OracleCdcJsonParser.class);
     private static final ObjectMapper objectMapper = new ObjectMapper();
@@ -25,7 +26,7 @@ public class OracleCdcJsonParser  {
     public OracleCdcJsonParser() {
     }
 
-
+    // 解析 CDC 消息，并兼容缺少 dateFieldUnits 的旧消息。
     public static KafkaPayload parseKafkaMessage(String value) throws Exception {
         // ✅ 记录方法开始时间
         long methodStartTime = System.currentTimeMillis();
@@ -99,13 +100,17 @@ public class OracleCdcJsonParser  {
             return null;
         }
 
-        // 持有当前表中，date,timestamp类型的字段，这些字段需要特殊处理
+        // 默认创建可修改的空集合，删除消息不解析源表日期元数据。
         Set<String> dateFieldSet = new HashSet<>();
-        JsonNode dateFieldNode = root.get("meta").get("dateFields");
-        if (dateFieldNode != null && dateFieldNode.isArray()) {
-            for (JsonNode f : dateFieldNode) {
-                dateFieldSet.add(f.asText());   // 已经是小写，不用再处理
-            }
+        Map<String, String> dateFieldUnits = Collections.emptyMap();
+
+        // 快照、新增和更新消息按新协议解析，删除消息直接保留空集合。
+        if (!"d".equals(op)) {
+            // 解析dateFields，必须是数组，允许为空数组。
+            dateFieldSet = parseDateFields(root);
+
+            // 解析dateFieldUnits 必须是对象，允许为空对象。
+            dateFieldUnits = parseDateFieldUnits(root);
         }
 
 
@@ -166,7 +171,12 @@ public class OracleCdcJsonParser  {
 //                isLastSnapshotData(root),
 //                isLastRecordInTable(root));
 
-        // 构造带 Kafka topic 元数据的 DML payload
+        // 解析新增的日期字段单位节点，旧消息得到空 Map。
+
+
+
+
+         // 将业务数据、日期字段和单位映射一起传入消息对象。
         return new KafkaPayload(
                 kafkaTopic,
                 kafkaPartition,
@@ -180,12 +190,14 @@ public class OracleCdcJsonParser  {
                 beforeMap,
                 afterMap,
                 dateFieldSet,
+                dateFieldUnits,
                 primaryKeySet,
                 rawMessage,
                 isSnapshotData(root),
                 isLastSnapshotData(root),
                 isLastRecordInTable(root)
         );
+
     }
 
     private static Map<String, Object> convertJsonToMap(JsonNode nodeNode, Set<String> dateFields) throws com.fasterxml.jackson.core.JsonProcessingException {
@@ -337,6 +349,92 @@ public class OracleCdcJsonParser  {
 
         // 返回整数值
         return node.asInt();
+    }
+
+
+    // 按新协议解析日期字段数组，节点必须存在，允许返回空 Set。
+    private static Set<String> parseDateFields(JsonNode root) {
+        // 获取日期字段节点，缺失、null 或其他类型均不符合新协议。
+        JsonNode fieldsNode = root.path("meta").path("dateFields");
+        if (!fieldsNode.isArray()) {
+            throw new IllegalArgumentException(
+                    "meta.dateFields 必须存在且为 JSON 数组，允许为空数组 []"
+            );
+        }
+
+        // 使用可修改集合，兼容后续添加 CDC 时间字段的现有代码。
+        Set<String> dateFields = new HashSet<>();
+
+        // 逐项读取日期字段名。
+        for (JsonNode fieldNode : fieldsNode) {
+            // 字段名必须是非空字符串。
+            if (!fieldNode.isTextual() || fieldNode.textValue().trim().isEmpty()) {
+                throw new IllegalArgumentException(
+                        "meta.dateFields 中的字段名必须是非空字符串"
+                );
+            }
+
+            // 字段名统一为小写，与消息数据中的字段名保持一致。
+            dateFields.add(fieldNode.textValue().toLowerCase(Locale.ROOT));
+        }
+
+        // 空数组自然返回空 Set，不返回 null。
+        return dateFields;
+    }
+
+    // 按新协议解析日期字段单位，节点必须存在，允许返回空 Map。
+    private static Map<String, String> parseDateFieldUnits(JsonNode root) {
+        // 获取单位节点，不再兼容节点缺失或为 null 的旧消息。
+        JsonNode unitsNode = root.path("meta").path("dateFieldUnits");
+        if (!unitsNode.isObject()) {
+            throw new IllegalArgumentException(
+                    "meta.dateFieldUnits 必须存在且为 JSON 对象，允许为空对象 {}"
+            );
+        }
+
+        // 保存字段对应的明确单位。
+        Map<String, String> dateFieldUnits = new LinkedHashMap<>();
+        Iterator<Map.Entry<String, JsonNode>> fields = unitsNode.fields();
+
+        // 逐项校验并提取单位。
+        while (fields.hasNext()) {
+            Map.Entry<String, JsonNode> field = fields.next();
+            String fieldName = field.getKey();
+            JsonNode unitNode = field.getValue();
+
+            // 字段名不能为空。
+            if (fieldName.trim().isEmpty()) {
+                throw new IllegalArgumentException(
+                        "meta.dateFieldUnits 中的字段名不能为空"
+                );
+            }
+
+            // 单位必须为字符串，不将 null 当作缺少单位继续处理。
+            if (!unitNode.isTextual()) {
+                throw new IllegalArgumentException(
+                        "meta.dateFieldUnits." + fieldName
+                                + " 必须是字符串，且为 ms、us、ns 之一"
+                );
+            }
+
+            // 严格接受协议约定的单位，不按数字位数猜测。
+            String unit = unitNode.textValue();
+            if (!"ms".equals(unit)
+                    && !"us".equals(unit)
+                    && !"ns".equals(unit)) {
+                throw new IllegalArgumentException(
+                        "meta.dateFieldUnits." + fieldName
+                                + " 的单位无效: " + unit
+                                + "，仅支持 ms、us、ns"
+                );
+            }
+
+            // 字段名统一为小写，单位保持协议中的原值。
+            dateFieldUnits.put(fieldName.toLowerCase(Locale.ROOT), unit);
+        }
+
+        // 空对象正常返回空 Map，不返回 null。
+        return dateFieldUnits;
     }
 
 }

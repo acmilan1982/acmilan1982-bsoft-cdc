@@ -14,6 +14,7 @@ import com.bsoft.common.bean.*;
 import com.bsoft.common.constants.CdcColumnConstants;
 import com.bsoft.common.dataSource.HikariMonitor;
 import com.bsoft.common.enums.DatabaseType;
+import com.bsoft.common.util.ExceptionDetailUtil;
 import com.bsoft.server.batch.BatchInsertItem;
 import com.bsoft.server.batch.BatchSizeManager;
 import com.bsoft.server.sql.adapter.DataSourceHolder;
@@ -31,15 +32,13 @@ import java.lang.management.ThreadMXBean;
 import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.SQLException;
+import java.sql.Statement;
 import java.time.LocalDateTime;
 import java.util.*;
 import java.util.stream.Collectors;
 
-/**
- * Oracle数据库插入策略实现
- * 修改策略：只插入新数据，如果主键重复则忽略（不插入不更新）
- */
-public abstract class AbstractInsertStrategy  implements  InsertStrategy{
+// 插入策略基类，执行单条及同结构批量插入，并传递日期字段单位。
+public abstract class AbstractInsertStrategy implements InsertStrategy {
 
 
     private static final Logger logger = LogManager.getLogger(AbstractInsertStrategy.class);
@@ -56,13 +55,199 @@ public abstract class AbstractInsertStrategy  implements  InsertStrategy{
         this.dataSourceHolder = new DataSourceHolder(targetDataSourceConfig) ;
     }
 
-
-
+    // 执行 Oracle、MySQL 批量新增，按输入位置返回处理状态。
+// 上游保证字段结构和日期单位一致，整批使用一个 SQL，不在本方法内拆批。
     @Override
-    public Map<Long, String>    executeBatchInsert(String tableName,
+    public List<String> executeBatchInsertOrdered(
+            String tableName,
+            List<BatchInsertItem> batchItems,
+            BatchSizeManager batchSizeManager,
+            List<ColumnInfo> allColumns,
+            boolean needPadding) throws Exception {
+        // 校验输入，空批次返回空结果。
+        Objects.requireNonNull(batchItems, "新增批次不能为 null");
+        if (batchItems.isEmpty()) {
+            return new ArrayList<>();
+        }
+        if (tableName == null || tableName.trim().isEmpty()) {
+            throw new IllegalArgumentException("新增的目标表名不能为空");
+        }
+
+        // 检查策略初始化状态。
+        if (dataSourceHolder == null
+                || dataSourceHolder.getTargetDataSourceConfig() == null
+                || adapter == null) {
+            throw new IllegalStateException("JDBC 新增策略尚未初始化");
+        }
+
+        // 防止 Doris 尚未重写新入口时误走 JDBC。
+        DatabaseType databaseType = dataSourceHolder.getTargetDataSourceConfig().getDataSourceType();
+        if (databaseType != DatabaseType.ORACLE && databaseType != DatabaseType.MYSQL) {
+            throw new UnsupportedOperationException(
+                    "当前 JDBC 批量新增入口不支持: " + databaseType);
+        }
+
+        // 确保每个输入位置都有有效消息，不能通过删除列表元素跳过。
+        for (BatchInsertItem item : batchItems) {
+            if (item == null || item.getPayload() == null || item.getData() == null) {
+                throw new IllegalArgumentException("新增批次包含空 item、payload 或 data");
+            }
+        }
+
+        // 沿用同结构批次约定，字段顺序只确定一次。
+        BatchInsertItem firstItem = batchItems.get(0);
+        List<String> fieldList = new ArrayList<>(firstItem.getData().keySet());
+        Collections.sort(fieldList);
+
+        // 复制日期元数据，补充服务端 CDC 时间字段。
+        Set<String> dateFieldSet = new HashSet<>(Objects.requireNonNull(
+                firstItem.getPayload().getDateFieldSet(),
+                "dateFieldSet 不能为 null"));
+        appendCdcTimeFields(dateFieldSet);
+
+        // 整批沿用首条记录的明确日期单位，不猜测单位。
+        Map<String, String> dateFieldUnits = new LinkedHashMap<>(
+                Objects.requireNonNull(
+                        firstItem.getPayload().getDateFieldUnits(),
+                        "dateFieldUnits 不能为 null"));
+        Set<String> primaryKeys = new LinkedHashSet<>(
+                Objects.requireNonNull(
+                        firstItem.getPayload().getPrimaryKeySet(),
+                        "primaryKeySet 不能为 null"));
+
+        // SQL 只构建一次，与整批参数绑定共用字段顺序和日期元数据。
+        String sql = buildInsertSql(
+                tableName,
+                fieldList,
+                primaryKeys,
+                dateFieldSet,
+                dateFieldUnits);
+
+        // 每个输入位置预留一个结果，禁止使用 offset 作为结果标识。
+        List<String> statuses = new ArrayList<>(
+                Collections.nCopies(batchItems.size(), "NOT_EXECUTED"));
+
+        // 保存已加入 JDBC 批次的原始位置，用于准确回填结果。
+        List<Integer> boundIndexes = new ArrayList<>(batchItems.size());
+
+
+        // 记录批次开始时间，用于统计准备、获取连接、绑定、执行及提交的总耗时。
+        long startNanos = System.nanoTime();
+
+
+        // 整批使用一个连接和一个事务。
+        try (Connection connection = dataSourceHolder.getDataSource().getConnection()) {
+            // 禁止自动提交，执行结果确认后再统一提交。
+            connection.setAutoCommit(false);
+
+            try {
+                // 所有成功绑定的记录共用同一个 PreparedStatement。
+                try (PreparedStatement statement = connection.prepareStatement(sql)) {
+                    for (int itemIndex = 0; itemIndex < batchItems.size(); itemIndex++) {
+                        BatchInsertItem item = batchItems.get(itemIndex);
+
+                        // 清理上一条参数，清理失败时终止整个批次。
+                        statement.clearParameters();
+
+                        // 单条绑定失败保留原始结果位置，不影响其他位置的关联。
+                        try {
+                            setParameters(
+                                    statement,
+                                    item.getData(),
+                                    fieldList,
+                                    dateFieldSet,
+                                    dateFieldUnits);
+                        } catch (Exception bindingException) {
+                            // 记录失败摘要，原始消息由 writer 按日志规则保存。
+                            statuses.set(
+                                    itemIndex,
+                                    "BINDING_FAILED: "
+                                            + ExceptionDetailUtil.buildRootCauseDetail(
+                                            bindingException, 2000));
+                            continue;
+                        }
+
+                        // addBatch 失败不按普通绑定失败跳过，避免批次状态不确定。
+                        statement.addBatch();
+                        boundIndexes.add(itemIndex);
+                    }
+
+                    // 至少一条绑定成功时才执行数据库批次。
+                    if (!boundIndexes.isEmpty()) {
+                        int[] results = statement.executeBatch();
+
+                        // 返回数量必须与实际加入 JDBC 批次的命令数量一致。
+                        if (results == null || results.length != boundIndexes.size()) {
+                            throw new SQLException(
+                                    "批量新增返回结果数量与绑定成功数量不一致");
+                        }
+
+                        // 当前是普通 INSERT，零行或负数失败状态不能视为成功。
+                        for (int resultIndex = 0; resultIndex < results.length; resultIndex++) {
+                            int affectedRows = results[resultIndex];
+                            if (affectedRows != Statement.SUCCESS_NO_INFO
+                                    && affectedRows <= 0) {
+                                throw new SQLException(
+                                        "批量新增命令失败，输入索引="
+                                                + boundIndexes.get(resultIndex)
+                                                + "，返回值=" + affectedRows);
+                            }
+                        }
+                    }
+                }
+
+                // Statement 正常关闭后提交，提交前不标记 SUCCESS。
+                connection.commit();
+
+                // 只回填实际加入 JDBC 批次的输入位置。
+                for (Integer itemIndex : boundIndexes) {
+                    statuses.set(itemIndex, "SUCCESS");
+                }
+
+
+
+                // 提交成功后统计结果，绑定失败的记录不计入成功数量。
+                int successCount = boundIndexes.size();
+                String batchResult = successCount == batchItems.size()
+                        ? "SUCCESS"
+                        : (successCount > 0 ? "PARTIAL_FAILURE" : "FAILED");
+
+                // 总耗时以秒为单位，保留三位小数。
+                String elapsedSeconds = String.format(
+                        Locale.ROOT,
+                        "%.3f",
+                        (System.nanoTime() - startNanos) / 1_000_000_000.0);
+
+                // 仅在正常提交后打印汇总，不重复记录异常原因。
+                logger.info(
+                        "批量插入完成，table={}，输入条数={}，成功条数={}，总耗时={}秒，结果={}",
+                        tableName,
+                        batchItems.size(),
+                        successCount,
+                        elapsedSeconds,
+                        batchResult);
+            } catch (Exception exception) {
+                // 执行或提交异常时尝试回滚，禁止返回可能误导的成功状态。
+                try {
+                    connection.rollback();
+                } catch (Exception rollbackException) {
+                    // 保留最初异常，并附加回滚异常。
+                    exception.addSuppressed(rollbackException);
+                }
+                throw exception;
+            }
+        }
+
+        // 结果长度和输入长度一致，绑定失败的位置也保留。
+        return statuses;
+    }
+    // oracle,mysql走当前方法
+    // 上游已保证当前批次 结构和日期单位一致，整批使用同一个插入 SQL。
+    @Override
+    public Map<Long, String> executeBatchInsert(String tableName,                   // 目标表名
                                                 List<BatchInsertItem> batchItems,
                                                 BatchSizeManager batchSizeManager,
-                                                List<ColumnInfo> allColumns,
+                                                List<ColumnInfo> allColumns,        // 目标表的列信息
                                                 boolean needPadding) throws Exception {
 
         if (batchItems.isEmpty()) {
@@ -76,15 +261,27 @@ public abstract class AbstractInsertStrategy  implements  InsertStrategy{
         List<String> fieldList = new ArrayList<>(firstItem.getData().keySet());
         Collections.sort(fieldList);
 
-        Set<String> dateFieldSet = firstItem.getPayload().getDateFieldSet();
+
+
+        // 复制首条记录的日期字段集合，补充 CDC 字段时不修改原消息。
+        Set<String> dateFieldSet = new HashSet<>(firstItem.getPayload().getDateFieldSet());
         appendCdcTimeFields(dateFieldSet);
+
+        // 上游保证同批次日期单位一致，整批共用首条记录的单位映射。
+        Map<String, String> dateFieldUnits = firstItem.getPayload().getDateFieldUnits();
+
 
         Set<String> primaryKeys = firstItem.getPayload().getPrimaryKeySet();
 
 
 
-        // 生成sql语句
-        String sql = buildInsertSql(tableName, fieldList, primaryKeys, dateFieldSet);
+        // 构建批量插入SQL
+        String sql = buildInsertSql(tableName,
+                                    fieldList,
+                                    primaryKeys,
+                                    dateFieldSet,
+                                    dateFieldUnits
+        );
 
         // 记录每条数据的处理状态，value为状态码或错误信息，整个生命周期中，value可能会发生多次变化
         Map<Long, String> statusMap = new HashMap<>(); // offset -> status/error
@@ -96,16 +293,12 @@ public abstract class AbstractInsertStrategy  implements  InsertStrategy{
 
 
 
-
-
-
-
         long connectionStartTime = System.currentTimeMillis();
 //
-//        // ✅ 增加超时前的状态快照
+//        //  增加超时前的状态快照
 //        if (this.dataSourceHolder.getDataSource() instanceof HikariDataSource) {
 //            HikariDataSource ds = (HikariDataSource) this.dataSourceHolder.getDataSource();
-//            logger.info("⏱️ 准备获取连接: 池名={}, 活动={}, 空闲={}, 总数={}, 等待线程={}, 方法已耗时={}ms",
+//            logger.info("⏱ 准备获取连接: 池名={}, 活动={}, 空闲={}, 总数={}, 等待线程={}, 方法已耗时={}ms",
 //                    ds.getPoolName(),
 //                    ds.getHikariPoolMXBean().getActiveConnections(),
 //                    ds.getHikariPoolMXBean().getIdleConnections(),
@@ -118,11 +311,11 @@ public abstract class AbstractInsertStrategy  implements  InsertStrategy{
 
 //            long connectionAcquireTime = System.currentTimeMillis() - connectionStartTime;
 //
-//            // ✅ 详细记录连接获取信息
-//            logger.info("✅ 成功获取连接: 耗时={}ms, 表={}, 批次={}, 线程={}",
+//            //  详细记录连接获取信息
+//            logger.info(" 成功获取连接: 耗时={}ms, 表={}, 批次={}, 线程={}",
 //                    connectionAcquireTime, tableName, batchItems.size(), Thread.currentThread().getName());
 
-            // ✅ 测试连接有效性
+            //  测试连接有效性
             long pingStartTime = System.currentTimeMillis();
             if (conn.isValid(5)) {  // 5秒超时
                 long pingTime = System.currentTimeMillis() - pingStartTime;
@@ -145,10 +338,17 @@ public abstract class AbstractInsertStrategy  implements  InsertStrategy{
                 long startTime2 = System.currentTimeMillis();
                 // step1:参数绑定阶段
                 for (BatchInsertItem item : batchItems) {
+                    // 当前消息在topic上的偏移量
                     Long offset = item.getPayload().getOffset();
                     try {
-                        // 进行实际的参数绑定
-                        setParameters(ps, item.getData(), fieldList, dateFieldSet);
+                        // 使用与本批次 SQL 一致的日期元数据绑定当前记录。
+                        setParameters(
+                                ps,
+                                item.getData(),
+                                fieldList,
+                                dateFieldSet,
+                                dateFieldUnits
+                        );
                         ps.addBatch();
                         successfullyBoundCount++;
                         statusMap.put(offset, "BOUND_SUCCESS"); // 绑定成功
@@ -210,6 +410,7 @@ public abstract class AbstractInsertStrategy  implements  InsertStrategy{
                                 executionTimeSeconds3);
 
                     } catch (Exception e) {
+                        e.printStackTrace();
                         conn.rollback();
                         // 批量执行失败，更新所有绑定成功的数据状态
                         for (BatchInsertItem item : batchItems) {
@@ -272,7 +473,7 @@ public abstract class AbstractInsertStrategy  implements  InsertStrategy{
     }
 
 
-    // 单条数据的插入
+    // 执行单条插入，根据当前消息的日期单位构建 SQL 并绑定参数。
     @Override
     public void executeSingleInsert(String tableName, KafkaPayload payload,List<ColumnInfo> allColumns) throws Exception {
 
@@ -304,21 +505,36 @@ public abstract class AbstractInsertStrategy  implements  InsertStrategy{
 
 
 
-        // 获取日期字段集合
-        Set<String> dateFieldSet = payload.getDateFieldSet();
+         // 复制日期字段集合，补充 CDC 字段时不修改原消息。
+        Set<String> dateFieldSet = new HashSet<>(payload.getDateFieldSet());
         appendCdcTimeFields(dateFieldSet);
+
+         // 获取当前消息的日期字段单位。
+        Map<String, String> dateFieldUnits = payload.getDateFieldUnits();
 
         // 获取主键
         Set<String> primaryKeys = payload.getPrimaryKeySet();
 
-        // 生成SQL
-        String sql = buildInsertSql(tableName, fieldList, primaryKeys, dateFieldSet);
+       // 根据当前消息的单位选择 TO_DATE 或 TO_TIMESTAMP。
+        String sql = buildInsertSql(
+                tableName,
+                fieldList,
+                primaryKeys,
+                dateFieldSet,
+                dateFieldUnits
+        );
 
         try (Connection conn = this.dataSourceHolder.getDataSource().getConnection();
              PreparedStatement ps = conn.prepareStatement(sql)) {
 //            logger.info("afterData: {}", afterData);
-            // 设置参数
-            setParameters(ps, insertData, fieldList, dateFieldSet);
+            // 使用生成 SQL 时的同一份日期元数据绑定参数。
+            setParameters(
+                    ps,
+                    insertData,
+                    fieldList,
+                    dateFieldSet,
+                    dateFieldUnits
+            );
 
 
             // 执行插入
